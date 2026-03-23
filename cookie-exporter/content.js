@@ -3,12 +3,25 @@
  *
  * Two jobs:
  * 1. Push cookies to the bot every 5 minutes
- * 2. Keep the ANA session alive by periodically making requests to ANA
- *    (without this, ANA expires the session server-side even if the tab is open)
+ * 2. Keep the ANA session alive by periodically reloading the page
+ *
+ * Uses a Web Lock to prevent Chrome from freezing this tab in the background.
  */
 
 const PUSH_INTERVAL_MS = 5 * 60 * 1000;       // Push cookies every 5 min
-const KEEPALIVE_INTERVAL_MS = 15 * 60 * 1000;  // Ping ANA every 15 min to keep session alive
+const KEEPALIVE_INTERVAL_MS = 14 * 60 * 1000;  // Reload page every 14 min to keep session alive
+
+// Prevent Chrome from freezing this tab by holding a Web Lock
+// (Chrome won't freeze tabs that hold active locks)
+try {
+  navigator.locks.request('ana-award-tracker-keepalive', () => {
+    // Return a promise that never resolves — holds the lock forever
+    return new Promise(() => {});
+  });
+  console.log('[ANA Cookies] Web Lock acquired — tab will not be frozen');
+} catch (e) {
+  console.log('[ANA Cookies] Web Lock not available:', e.message);
+}
 
 function pushCookies() {
   try {
@@ -20,32 +33,11 @@ function pushCookies() {
       if (response?.ok) {
         console.log('[ANA Cookies] Pushed', response.count, 'cookies to bot');
       } else {
-        console.log('[ANA Cookies] Push failed:', response?.error || 'bot not running');
+        console.log('[ANA Cookies] Push result:', response?.error || 'bot not running');
       }
     });
   } catch (e) {
     console.log('[ANA Cookies] Push error:', e.message);
-  }
-}
-
-/**
- * Keep the ANA session alive by making a lightweight request.
- * This prevents server-side session expiry even when the user isn't
- * actively using the ANA tab.
- */
-async function keepAlive() {
-  try {
-    // Lightweight fetch to ANA — just enough to refresh the session cookie
-    const resp = await fetch('https://www.ana.co.jp/en/us/', {
-      credentials: 'include',
-      cache: 'no-store',
-    });
-    console.log('[ANA Cookies] Session keep-alive ping:', resp.status);
-
-    // After keep-alive, push refreshed cookies
-    pushCookies();
-  } catch (e) {
-    console.log('[ANA Cookies] Keep-alive failed:', e.message);
   }
 }
 
@@ -55,10 +47,19 @@ pushCookies();
 // Push every 5 minutes
 setInterval(pushCookies, PUSH_INTERVAL_MS);
 
-// Keep session alive every 15 minutes
-setInterval(keepAlive, KEEPALIVE_INTERVAL_MS);
+// Keep session alive by reloading the page every 14 minutes.
+// This makes a REAL browser request to ANA (with full Akamai fingerprint),
+// which the server trusts and extends the session timeout.
+// Using reload instead of fetch because:
+// - Akamai validates browser fingerprint on each request
+// - A real page load generates proper sensor data
+// - fetch() from a content script may not trigger Akamai properly
+setInterval(() => {
+  console.log('[ANA Cookies] Reloading page to keep session alive...');
+  window.location.reload();
+}, KEEPALIVE_INTERVAL_MS);
 
-// Push when tab becomes visible (user switches back)
+// Push when tab becomes visible
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') {
     pushCookies();

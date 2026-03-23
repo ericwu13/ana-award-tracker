@@ -8,6 +8,8 @@ const { Client, GatewayIntentBits } = require('discord.js');
 const { registerCommands, handleCommand } = require('./src/discord-commands');
 const { seedRoutesIfNeeded } = require('./src/routes');
 const { startCookieServer } = require('./src/cookie-server');
+const { startKeepAlive } = require('./src/session-keepalive');
+const { sendAlert } = require('./src/notifier');
 const { execSync, spawn } = require('child_process');
 
 // Seed routes from .env if first run
@@ -15,6 +17,19 @@ seedRoutesIfNeeded();
 
 // Start cookie server so Chrome extension can push cookies
 startCookieServer();
+
+// Start session keep-alive — pings ANA every 10 min from Node.js
+// This is reliable (unlike Chrome's frozen tabs and dead service workers)
+let staleAlertSent = false;
+startKeepAlive((ageMin) => {
+  // Alert once when cookies go stale
+  if (!staleAlertSent) {
+    staleAlertSent = true;
+    sendAlert(`⚠️ ANA cookies are ${ageMin}min old and may be stale.\nOpen Chrome → log into ANA → extension will push fresh cookies.`);
+    // Reset after 30 min so it can alert again
+    setTimeout(() => { staleAlertSent = false; }, 30 * 60 * 1000);
+  }
+});
 
 const token = process.env.DISCORD_BOT_TOKEN;
 if (!token) {
