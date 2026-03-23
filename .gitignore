@@ -1,0 +1,6 @@
+node_modules/
+.env
+data/
+.claude/
+debug-*.js
+test-*.js

@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "ANA Cookie Exporter",
+  "version": "3.0",
+  "description": "Auto-exports ANA cookies for the award tracker bot",
+  "permissions": ["cookies", "alarms"],
+  "host_permissions": ["*://*.ana.co.jp/*", "http://127.0.0.1:9444/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://*.ana.co.jp/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html"
+  }
+}

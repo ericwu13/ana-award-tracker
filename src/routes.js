@@ -1,0 +1,334 @@
+/**
+ * Route configuration manager.
+ * Reads/writes routes to data/routes.json, with .env ROUTES as initial seed.
+ */
+const fs = require('fs');
+const path = require('path');
+
+const ROUTES_FILE = path.join(__dirname, '..', 'data', 'routes.json');
+const STATE_FILE = path.join(__dirname, '..', 'data', 'state.json');
+
+/**
+ * Expand a month string (e.g., "2026-10") into weekly dates that cover the month.
+ * Each date covers ±3 days via ANA's calendar comparison view.
+ */
+function expandMonth(yearMonth) {
+  const [year, month] = yearMonth.split('-').map(Number);
+  const dates = [];
+  // Start on the 4th, then every 7 days
+  for (let day = 4; day <= 28; day += 7) {
+    const mm = String(month).padStart(2, '0');
+    const dd = String(day).padStart(2, '0');
+    dates.push(`${year}-${mm}-${dd}`);
+  }
+  return dates;
+}
+
+/**
+ * Parse a date input string. Accepts:
+ *   "2026-10-15"  → ["2026-10-15"]
+ *   "2026-10"     → ["2026-10-04", "2026-10-11", "2026-10-18", "2026-10-25"]
+ */
+function parseDateInput(input) {
+  const trimmed = input.trim();
+  if (/^\d{4}-\d{2}$/.test(trimmed)) {
+    return expandMonth(trimmed);
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+    return [trimmed];
+  }
+  return null; // invalid
+}
+
+/**
+ * Load routes from data/routes.json, falling back to .env ROUTES.
+ */
+function loadRoutes() {
+  // Try routes.json first
+  try {
+    if (fs.existsSync(ROUTES_FILE)) {
+      const data = JSON.parse(fs.readFileSync(ROUTES_FILE, 'utf8'));
+      if (data.routes && data.routes.length > 0) {
+        return data.routes;
+      }
+    }
+  } catch (e) {
+    console.log('[Routes] Could not read routes.json:', e.message);
+  }
+
+  // Fallback to .env
+  return parseEnvRoutes();
+}
+
+/**
+ * Parse ROUTES from .env.
+ */
+function parseEnvRoutes() {
+  const routesStr = process.env.ROUTES;
+  if (routesStr) {
+    return routesStr.split(';').map(r => r.trim()).filter(Boolean).map(entry => {
+      const [route, datesStr] = entry.split(':');
+      const [from, to] = route.split('-');
+      const dates = datesStr.split(',').map(d => d.trim());
+      return { from, to, dates };
+    });
+  }
+  return [];
+}
+
+/**
+ * Save routes to data/routes.json.
+ */
+function saveRoutes(routes) {
+  fs.mkdirSync(path.dirname(ROUTES_FILE), { recursive: true });
+  fs.writeFileSync(ROUTES_FILE, JSON.stringify({ routes, updatedAt: new Date().toISOString() }, null, 2));
+}
+
+/**
+ * Seed routes.json from .env if it doesn't exist yet.
+ */
+function seedRoutesIfNeeded() {
+  if (!fs.existsSync(ROUTES_FILE)) {
+    const routes = parseEnvRoutes();
+    if (routes.length > 0) {
+      saveRoutes(routes);
+      console.log(`[Routes] Seeded routes.json from .env (${routes.length} routes)`);
+    }
+  }
+}
+
+/**
+ * Add dates to a route. Creates the route if it doesn't exist.
+ * Returns { route, addedDates, totalDates }
+ */
+function addRoute(from, to, dates) {
+  const routes = loadRoutes();
+  let route = routes.find(r => r.from === from && r.to === to);
+
+  if (!route) {
+    route = { from, to, dates: [] };
+    routes.push(route);
+  }
+
+  const newDates = dates.filter(d => !route.dates.includes(d));
+  route.dates.push(...newDates);
+  route.dates.sort();
+
+  saveRoutes(routes);
+  return { route, addedDates: newDates, totalDates: route.dates.length };
+}
+
+/**
+ * Remove dates from a route. If no dates specified, removes entire route.
+ * Returns { removed, remainingDates }
+ */
+function removeRoute(from, to, dates = null) {
+  const routes = loadRoutes();
+  const idx = routes.findIndex(r => r.from === from && r.to === to);
+
+  if (idx === -1) return { removed: false, remainingDates: 0 };
+
+  if (!dates || dates.length === 0) {
+    // Remove entire route
+    routes.splice(idx, 1);
+    saveRoutes(routes);
+    return { removed: true, remainingDates: 0 };
+  }
+
+  // Remove specific dates
+  routes[idx].dates = routes[idx].dates.filter(d => !dates.includes(d));
+
+  if (routes[idx].dates.length === 0) {
+    routes.splice(idx, 1);
+  }
+
+  saveRoutes(routes);
+  return { removed: true, remainingDates: routes[idx]?.dates.length || 0 };
+}
+
+/**
+ * Load state and build a per-route, per-date status summary.
+ */
+function getStatusSummary() {
+  const routes = loadRoutes();
+  let state;
+  try {
+    state = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+  } catch {
+    state = { flights: {} };
+  }
+
+  const flights = state.flights || {};
+  const summary = [];
+
+  for (const route of routes) {
+    const routeLabel = `${route.from}→${route.to}`;
+    const dateSummaries = [];
+
+    for (const date of route.dates) {
+      // Find confirmed flights for this route+date (skip waitlist)
+      const matching = Object.entries(flights).filter(([key, f]) => {
+        return key.startsWith(`${routeLabel}|${date}|`) && f.status === 'confirmed';
+      });
+
+      if (matching.length === 0) {
+        dateSummaries.push({ date, ecoCount: 0, bizCount: 0 });
+        continue;
+      }
+
+      // Split by cabin class
+      const eco = matching.filter(([, f]) => {
+        const desc = (f.cabinDesc || '').toLowerCase();
+        return desc.includes('economy') && !desc.includes('business');
+      });
+      const biz = matching.filter(([, f]) => {
+        const desc = (f.cabinDesc || '').toLowerCase();
+        return desc.includes('business');
+      });
+
+      dateSummaries.push({ date, ecoCount: eco.length, bizCount: biz.length });
+    }
+
+    summary.push({ route: routeLabel, from: route.from, to: route.to, dates: dateSummaries });
+  }
+
+  return {
+    lastCheck: state.lastCheck,
+    totalFlights: Object.keys(flights).length,
+    summary,
+  };
+}
+
+/**
+ * Format the date for display: "2026-10-04" → "Oct 4"
+ */
+function shortDate(dateStr) {
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const [, m, d] = dateStr.split('-');
+  return `${months[parseInt(m) - 1]} ${parseInt(d)}`;
+}
+
+/**
+ * Format a compact status summary for Discord.
+ * Shows confirmed seats split by Economy/Business. Skips waitlist.
+ */
+function formatStatus() {
+  const { lastCheck, summary } = getStatusSummary();
+
+  const lines = [];
+  const lastCheckStr = lastCheck
+    ? new Date(lastCheck).toLocaleString('en-US', { timeZone: 'America/Los_Angeles', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true })
+    : 'Never';
+  lines.push(`📊 **ANA Award Tracker** — Last check: ${lastCheckStr}`);
+  lines.push('');
+
+  for (const route of summary) {
+    lines.push(`**${route.route}**`);
+    lines.push('```');
+    lines.push('Date       Eco  Biz');
+    lines.push('─────────────────────');
+
+    for (const ds of route.dates) {
+      const dateLabel = shortDate(ds.date).padEnd(10);
+      if (ds.ecoCount === 0 && ds.bizCount === 0) {
+        lines.push(`${dateLabel}  ❌    ❌`);
+      } else {
+        const eco = ds.ecoCount > 0 ? `${ds.ecoCount} ✅` : ' ❌ ';
+        const biz = ds.bizCount > 0 ? `${ds.bizCount} ✅` : ' ❌ ';
+        lines.push(`${dateLabel}${eco.padStart(5)}  ${biz.padStart(5)}`);
+      }
+    }
+
+    lines.push('```');
+  }
+
+  if (summary.length === 0) {
+    lines.push('No routes configured. Use `/track` to add routes.');
+  }
+
+  lines.push('_Use `/flights <from> <to> <class> <date>` for details_');
+  return lines.join('\n');
+}
+
+/**
+ * Format detailed flight list for a specific route+date+cabin.
+ * Only shows confirmed seats (skips waitlist).
+ */
+function formatFlights(from, to, dateInput, cabin) {
+  let state;
+  try {
+    state = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+  } catch {
+    return 'No data yet. Run `/check` first.';
+  }
+
+  const routeLabel = `${from}→${to}`;
+  const flights = state.flights || {};
+
+  // Find matching flights — filter by route, date prefix, and skip waitlist
+  const matching = Object.entries(flights).filter(([key, f]) => {
+    if (!key.startsWith(`${routeLabel}|`)) return false;
+    if (dateInput && !key.includes(`|${dateInput}`)) return false;
+    if (f.status !== 'confirmed') return false; // skip waitlist
+    return true;
+  });
+
+  // Filter by cabin if specified
+  const filtered = cabin
+    ? matching.filter(([, f]) => {
+        const desc = (f.cabinDesc || '').toLowerCase();
+        return desc.includes(cabin.toLowerCase());
+      })
+    : matching;
+
+  const dateLabel = dateInput.length === 7 ? dateInput : shortDate(dateInput);
+  const header = `✈️ **${routeLabel} | ${cabin || 'All'} | ${dateLabel}**`;
+
+  if (filtered.length === 0) {
+    return `${header}\n\nNo confirmed ${cabin || ''} seats found.`;
+  }
+
+  const lines = [header, ''];
+
+  for (const [, f] of filtered) {
+    const flightNum = f.flightNumber || 'unknown';
+    // Clean up cabin desc — remove duplicate flight number
+    let cabinInfo = f.cabinDesc || '';
+    if (flightNum && cabinInfo) {
+      cabinInfo = cabinInfo.replace(new RegExp(flightNum.replace('+', '\\+') + '\\s*', 'g'), '').trim();
+    }
+
+    const routeInfo = f.routeDesc || routeLabel;
+    const duration = f.duration ? ` | ${f.duration}` : '';
+    const date = f.date ? shortDate(f.date) : '';
+
+    lines.push(`✅ **${flightNum}** — ${date}`);
+    lines.push(`  ${routeInfo}${duration}`);
+    if (cabinInfo) lines.push(`  ${cabinInfo}`);
+    lines.push('');
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * Format routes list for display.
+ */
+function formatRoutes() {
+  const routes = loadRoutes();
+  if (routes.length === 0) return 'No routes configured.';
+
+  const lines = ['📋 **Tracked Routes**', ''];
+  for (const r of routes) {
+    const dates = r.dates.map(d => shortDate(d)).join(', ');
+    lines.push(`**${r.from}→${r.to}**: ${dates}`);
+  }
+  return lines.join('\n');
+}
+
+module.exports = {
+  loadRoutes, saveRoutes, seedRoutesIfNeeded,
+  addRoute, removeRoute,
+  parseDateInput, expandMonth, shortDate,
+  getStatusSummary, formatStatus, formatRoutes, formatFlights,
+};
