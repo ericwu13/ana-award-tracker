@@ -65,13 +65,12 @@ async function notifyAvailability(date, result, routeLabel) {
   const status = isWaitlist ? '⏳ WAITLIST' : '✅ CONFIRMED';
   const symbol = result.symbol || '?';
 
-  // Route info
-  let routeInfo = routeLabel || 'TPE → SFO';
-  if (result.routeDesc) {
-    routeInfo = result.routeDesc;
-  } else if (result.layover === true && result.stops && result.stops.length > 0) {
-    const [from, to] = (routeLabel || 'TPE→SFO').split('→').map(s => s.trim());
-    routeInfo = `${from} → ${result.stops.join(' → ')} → ${to}`;
+  // Route info — always use the search route label as the primary direction,
+  // add stops from the parsed data if available
+  const [searchFrom, searchTo] = (routeLabel || 'TPE→SFO').split('→').map(s => s.trim());
+  let routeInfo = `${searchFrom} → ${searchTo}`;
+  if (result.stops && result.stops.length > 0) {
+    routeInfo = `${searchFrom} → ${result.stops.join(' → ')} → ${searchTo}`;
   }
   const routeType = result.layover === true ? '🔄 Layover' : result.layover === false ? '✈️ Direct' : '✈️';
 

@@ -298,7 +298,10 @@ function formatFlights(from, to, dateInput, cabin) {
       cabinInfo = cabinInfo.replace(new RegExp(flightNum.replace('+', '\\+') + '\\s*', 'g'), '').trim();
     }
 
-    const routeInfo = f.routeDesc || routeLabel;
+    // Use search route + stops, not routeDesc (which can show wrong direction for codeshares)
+    const routeInfo = f.routeDesc && f.routeDesc.includes('→')
+      ? `${from}→${to}` + (f.routeDesc.split('→').length > 2 ? ' via ' + f.routeDesc.split('→').slice(1, -1).map(s => s.trim()).join(', ') : '')
+      : `${from}→${to}`;
     const duration = f.duration ? ` | ${f.duration}` : '';
     const date = f.date ? shortDate(f.date) : '';
 
