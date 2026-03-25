@@ -8,6 +8,7 @@ const path = require('path');
 
 const PORT = parseInt(process.env.COOKIE_SERVER_PORT || '9444');
 const COOKIE_PATH = path.join(__dirname, '..', 'data', 'cookies.json');
+const { clearStale } = require('./session-stale');
 const KEY_COOKIES = ['personal', '_abck']; // Must be present for a valid session
 
 let server = null;
@@ -37,7 +38,10 @@ function startCookieServer() {
 
     if (req.method === 'POST' && req.url === '/cookies') {
       let body = '';
-      req.on('data', chunk => body += chunk);
+      req.on('data', chunk => {
+        body += chunk;
+        if (body.length > 1_000_000) { res.writeHead(413); res.end('Too large'); req.destroy(); }
+      });
       req.on('end', () => {
         try {
           const cookies = JSON.parse(body);
@@ -56,6 +60,9 @@ function startCookieServer() {
           fs.mkdirSync(path.dirname(COOKIE_PATH), { recursive: true });
           fs.writeFileSync(COOKIE_PATH, JSON.stringify(cookies, null, 2));
           lastPushTime = Date.now();
+
+          // Clear stale flag — fresh cookies from Chrome mean session is valid again
+          if (missing.length === 0) clearStale();
 
           console.log(`[CookieServer] Received ${cookies.length} cookies (${missing.length === 0 ? 'valid' : 'INCOMPLETE'})`);
           res.writeHead(200, { 'Content-Type': 'application/json' });

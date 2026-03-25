@@ -13,7 +13,12 @@ const commands = [
     .setDescription('Add a route and date to track for award availability')
     .addStringOption(opt => opt.setName('from').setDescription('Departure airport code (e.g., TPE, SFO, NRT)').setRequired(true))
     .addStringOption(opt => opt.setName('to').setDescription('Arrival airport code (e.g., SFO, TPE, LAX)').setRequired(true))
-    .addStringOption(opt => opt.setName('date').setDescription('YYYY-MM-DD for a date, YYYY-MM for whole month (e.g., 2026-10-15 or 2026-10)').setRequired(true)),
+    .addStringOption(opt => opt.setName('date').setDescription('YYYY-MM-DD for a date, YYYY-MM for whole month (e.g., 2026-10-15 or 2026-10)').setRequired(true))
+    .addStringOption(opt => opt.setName('cabin').setDescription('Cabin class to track (default: both)').setRequired(false).addChoices(
+      { name: 'Economy only', value: 'economy' },
+      { name: 'Business only', value: 'business' },
+      { name: 'Both', value: 'both' },
+    )),
 
   new SlashCommandBuilder()
     .setName('untrack')
@@ -94,19 +99,22 @@ async function handleCommand(interaction, triggerCheck) {
     const to = interaction.options.getString('to').toUpperCase();
     const dateInput = interaction.options.getString('date');
 
+    const cabin = interaction.options.getString('cabin') || 'both';
+
     const dates = parseDateInput(dateInput);
     if (!dates) {
       await interaction.reply(`❌ Invalid date format: \`${dateInput}\`\nUse \`YYYY-MM-DD\` for a specific date (e.g., \`2026-10-15\`) or \`YYYY-MM\` for a whole month (e.g., \`2026-10\`).`);
       return;
     }
 
-    const { addedDates, totalDates } = addRoute(from, to, dates);
+    const { addedDates, totalDates } = addRoute(from, to, dates, cabin);
     const datesStr = dates.map(d => `\`${d}\``).join(', ');
 
+    const cabinLabel = cabin === 'both' ? 'Economy+Business' : cabin.charAt(0).toUpperCase() + cabin.slice(1);
     if (addedDates.length === 0) {
-      await interaction.reply(`Already tracking ${from}→${to} on those dates. (${totalDates} dates total)`);
+      await interaction.reply(`Already tracking ${from}→${to} (${cabinLabel}) on those dates. (${totalDates} dates total)`);
     } else {
-      await interaction.reply(`✅ Added **${from}→${to}** for ${datesStr}\n${addedDates.length} new date(s), ${totalDates} total.`);
+      await interaction.reply(`✅ Added **${from}→${to}** (${cabinLabel}) for ${datesStr}\n${addedDates.length} new date(s), ${totalDates} total.`);
     }
   }
 

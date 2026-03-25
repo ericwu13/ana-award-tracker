@@ -366,15 +366,16 @@ class Session {
     });
     await randomDelay(500, 1000);
 
-    // Force-set date fields
+    // Force-set date fields — do NOT use calendar comparison (±3 days)
+    // Each date gets its own direct search for full flight details
     await page.evaluate((hDate, vDate) => {
       const dt = document.querySelector('[id="awardDepartureDate:field"]');
       const dtText = document.querySelector('[id="awardDepartureDate:field_pctext"]');
       if (dt) { dt.value = hDate; dt.dispatchEvent(new Event('change', { bubbles: true })); }
       if (dtText) { dtText.value = vDate; }
-      // Enable "Compare seat availability ±3 days" checkbox
+      // UNCHECK comparison — go straight to flight detail page
       const cb = document.querySelector('#comparisonSearchType');
-      if (cb && !cb.checked) cb.click();
+      if (cb && cb.checked) cb.click();
     }, hiddenDate, visibleDate);
     await randomDelay(1000, 1500);
 
@@ -408,42 +409,34 @@ class Session {
       throw err;
     }
 
-    // Check if we're on the calendar comparison page
-    const isCalendarPage = await page.evaluate(() => {
-      const url = window.location.href;
-      const text = document.body?.innerText || '';
-      return url.includes('calendar') || text.includes('Compare seat availability');
-    });
-
-    // Parse calendar results first (which dates have availability)
-    const calendarResults = await parseResults(page, cabinName);
-    this.log(`Calendar: ${calendarResults.length} result(s) for ${date}`);
-
-    // Click "Next" to get detailed flight info
-    if (isCalendarPage) {
-      const clicked = await page.evaluate(() => {
-        const btns = Array.from(document.querySelectorAll('input[type="submit"]'));
-        const next = btns.find(b => /next|次/i.test(b.value));
-        if (next) { next.click(); return true; }
-        return false;
-      });
-
-      if (clicked) {
-        await randomDelay(3000, 5000);
-        await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 60000 }).catch(() => {});
-        await randomDelay(2000, 3000);
-
-        // Parse the flight detail page
-        const detailResults = await parseFlightDetails(page, cabinName);
-        if (detailResults.length > 0) {
-          this.log(`Flights: ${detailResults.length} itinerary(s) for ${date}`);
-          return { results: detailResults, needsLogin: false };
-        }
-      }
+    // We should be on the flight detail page (not calendar, since we unchecked comparison)
+    // Parse flight details directly
+    const detailResults = await parseFlightDetails(page, cabinName);
+    if (detailResults.length > 0) {
+      this.log(`${detailResults.length} flight(s) for ${date}`);
+      return { results: detailResults, needsLogin: false };
     }
 
-    // Fallback to calendar results if detail page didn't work
-    return { results: calendarResults, needsLogin: false };
+    // Check if "no results" page
+    const noResults = await page.evaluate(() => {
+      const text = document.body?.innerText || '';
+      return text.includes('no flights') || text.includes('E_A01P01_0006') ||
+             text.includes('合うものがありませんでした');
+    });
+    if (noResults) {
+      this.log(`No flights for ${date}`);
+      return { results: [{ noResults: true }], needsLogin: false };
+    }
+
+    // Fallback: might still be on calendar if checkbox didn't uncheck
+    const calendarResults = await parseResults(page, cabinName);
+    if (calendarResults.length > 0) {
+      this.log(`Calendar fallback: ${calendarResults.length} result(s) for ${date}`);
+      return { results: calendarResults, needsLogin: false };
+    }
+
+    this.log(`No results parsed for ${date}`);
+    return { results: [], needsLogin: false };
   }
 }
 
@@ -513,7 +506,7 @@ async function runParallel(jobs, maxSessions = 4) {
     }
   });
 
-  await Promise.all(workers);
+  await Promise.allSettled(workers);
   return allResults;
 }
 

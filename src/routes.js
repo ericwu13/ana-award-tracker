@@ -9,14 +9,15 @@ const ROUTES_FILE = path.join(__dirname, '..', 'data', 'routes.json');
 const STATE_FILE = path.join(__dirname, '..', 'data', 'state.json');
 
 /**
- * Expand a month string (e.g., "2026-10") into weekly dates that cover the month.
- * Each date covers ±3 days via ANA's calendar comparison view.
+ * Expand a month string (e.g., "2026-10") into dates covering the month.
+ * Each date gets its own direct search (no calendar ±3 day view).
+ * Dates every 3 days for good coverage without too many searches.
  */
 function expandMonth(yearMonth) {
   const [year, month] = yearMonth.split('-').map(Number);
+  const daysInMonth = new Date(year, month, 0).getDate();
   const dates = [];
-  // Start on the 4th, then every 7 days
-  for (let day = 4; day <= 28; day += 7) {
+  for (let day = 1; day <= daysInMonth; day += 3) {
     const mm = String(month).padStart(2, '0');
     const dd = String(day).padStart(2, '0');
     dates.push(`${year}-${mm}-${dd}`);
@@ -99,15 +100,21 @@ function seedRoutesIfNeeded() {
 
 /**
  * Add dates to a route. Creates the route if it doesn't exist.
+ * @param {string} cabin - 'economy', 'business', or 'both' (default)
  * Returns { route, addedDates, totalDates }
  */
-function addRoute(from, to, dates) {
+function addRoute(from, to, dates, cabin = 'both') {
   const routes = loadRoutes();
   let route = routes.find(r => r.from === from && r.to === to);
 
   if (!route) {
-    route = { from, to, dates: [] };
+    route = { from, to, dates: [], cabin: cabin };
     routes.push(route);
+  }
+
+  // Update cabin preference if explicitly set
+  if (cabin !== 'both') {
+    route.cabin = cabin;
   }
 
   const newDates = dates.filter(d => !route.dates.includes(d));
@@ -324,7 +331,8 @@ function formatRoutes() {
   const lines = ['📋 **Tracked Routes**', ''];
   for (const r of routes) {
     const dates = r.dates.map(d => shortDate(d)).join(', ');
-    lines.push(`**${r.from}→${r.to}**: ${dates}`);
+    const cabin = r.cabin === 'economy' ? '(Eco)' : r.cabin === 'business' ? '(Biz)' : '(Eco+Biz)';
+    lines.push(`**${r.from}→${r.to}** ${cabin}: ${dates}`);
   }
   return lines.join('\n');
 }

@@ -20,10 +20,16 @@ const { loadRoutes } = require('./routes');
 
 const STATE_FILE = path.join(__dirname, '..', 'data', 'state.json');
 const ROUTES = loadRoutes();
-const CABIN_CLASSES = [
+const ALL_CABINS = [
   { code: 'CFF1', name: 'Economy' },
   { code: 'CFF2', name: 'Business' },
 ];
+
+function getCabinsForRoute(route) {
+  if (route.cabin === 'economy') return [ALL_CABINS[0]];
+  if (route.cabin === 'business') return [ALL_CABINS[1]];
+  return ALL_CABINS; // 'both' or undefined
+}
 
 function loadState() {
   try {
@@ -153,10 +159,11 @@ async function main() {
   const state = loadState();
 
   try {
-    // Build search jobs: each route × each cabin class
+    // Build search jobs: each route × its cabin classes
     const jobs = [];
     for (const route of ROUTES) {
-      for (const cabin of CABIN_CLASSES) {
+      const cabins = getCabinsForRoute(route);
+      for (const cabin of cabins) {
         jobs.push({
           from: route.from,
           to: route.to,
@@ -165,6 +172,26 @@ async function main() {
           cabinName: cabin.name,
         });
       }
+    }
+
+    // Check if session is known to be stale — don't waste time searching
+    const { isStale, getStaleInfo } = require('./session-stale');
+    if (isStale()) {
+      const info = getStaleInfo();
+      console.log(`[Main] Session is stale: ${info?.reason}. Skipping search.`);
+      await sendStatusUpdate(`⏸️ Search skipped — session stale: ${info?.reason}\nLog in to ANA in Chrome to resume.`);
+      return;
+    }
+
+    // Refresh cookies right before searching — ensures they're fresh
+    console.log('[Main] Refreshing session before search...');
+    const { refreshSession } = require('./session-keepalive');
+    await refreshSession();
+
+    // Check again after refresh attempt
+    if (isStale()) {
+      console.log('[Main] Session went stale during refresh. Skipping search.');
+      return;
     }
 
     // Run all searches in parallel
@@ -217,7 +244,7 @@ async function main() {
   } finally {
     await destroyDiscord();
     console.log('[Main] Exiting.');
-    process.exit(0);
+    process.exit(process.exitCode || 0);
   }
 }
 

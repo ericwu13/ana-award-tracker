@@ -21,12 +21,10 @@ startCookieServer();
 // Start session keep-alive — pings ANA every 10 min from Node.js
 // This is reliable (unlike Chrome's frozen tabs and dead service workers)
 let staleAlertSent = false;
-startKeepAlive((ageMin) => {
-  // Alert once when cookies go stale
+startKeepAlive((message) => {
   if (!staleAlertSent) {
     staleAlertSent = true;
-    sendAlert(`⚠️ ANA cookies are ${ageMin}min old and may be stale.\nOpen Chrome → log into ANA → extension will push fresh cookies.`);
-    // Reset after 30 min so it can alert again
+    sendAlert(`⚠️ ANA session issue: ${message}`);
     setTimeout(() => { staleAlertSent = false; }, 30 * 60 * 1000);
   }
 });
