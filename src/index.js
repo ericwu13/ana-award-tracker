@@ -143,6 +143,29 @@ function processResults(allResults, state) {
     }
   }
 
+  // Detect flights that disappeared — were tracked but not seen in this run
+  const searchedDates = new Set();
+  for (const { route, date, results } of allResults) {
+    // Only consider dates where we got actual results (not failed sessions)
+    if (results && results.length > 0 && !results[0]?._sessionFailed) {
+      searchedDates.add(`${route}|${date}`);
+    }
+  }
+
+  for (const [key, flight] of Object.entries(state.flights)) {
+    const [route, date] = key.split('|');
+    const routeDate = `${route}|${date}`;
+
+    // Only mark gone if we actually searched this date and didn't find the flight
+    if (searchedDates.has(routeDate) && !seenKeys.has(key)) {
+      if (flight.status === 'confirmed') {
+        console.log(`[Main] ❌ GONE: ${route} ${date} ${flight.flightNumber} was confirmed, now unavailable`);
+        sendAlert(`❌ **Seats gone**: ${flight.flightNumber} ${route} ${date}\n${flight.cabinDesc || ''} — no longer available`);
+      }
+      delete state.flights[key];
+    }
+  }
+
   return alertsSent;
 }
 
