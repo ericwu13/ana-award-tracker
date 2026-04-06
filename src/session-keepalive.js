@@ -17,7 +17,7 @@ const path = require('path');
 
 const { isStale, markStale } = require('./session-stale');
 const COOKIE_PATH = path.join(__dirname, '..', 'data', 'cookies.json');
-const KEEPALIVE_INTERVAL_MS = 15 * 60 * 1000; // Every 15 minutes
+const KEEPALIVE_INTERVAL_MS = 25 * 60 * 1000; // Every 25 minutes
 const STALE_THRESHOLD_MS = 2 * 60 * 60 * 1000; // Alert if >2 hours without refresh
 
 let keepAliveTimer = null;

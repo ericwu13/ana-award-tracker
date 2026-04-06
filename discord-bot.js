@@ -6,7 +6,7 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits } = require('discord.js');
 const { registerCommands, handleCommand } = require('./src/discord-commands');
-const { seedRoutesIfNeeded } = require('./src/routes');
+const { seedRoutesIfNeeded, cleanupExpiredDates } = require('./src/routes');
 const { startCookieServer } = require('./src/cookie-server');
 const { startKeepAlive } = require('./src/session-keepalive');
 const { sendAlert } = require('./src/notifier');
@@ -14,6 +14,12 @@ const { execSync, spawn } = require('child_process');
 
 // Seed routes from .env if first run
 seedRoutesIfNeeded();
+
+// Clean up expired dates on startup
+const cleanup = cleanupExpiredDates();
+if (cleanup.removedDates.length > 0) {
+  console.log(`[Discord] Removed ${cleanup.removedDates.length} expired date(s), ${cleanup.removedFlights} cached flights`);
+}
 
 // Start cookie server so Chrome extension can push cookies
 startCookieServer();

@@ -450,15 +450,16 @@ async function runParallel(jobs, maxSessions = 4) {
   const allResults = [];
   const sessions = [];
 
-  // Flatten jobs into individual search tasks
+  // Flatten jobs into individual search tasks, sorted by date (earliest first)
   const tasks = [];
   for (const job of jobs) {
     for (const date of job.dates) {
       tasks.push({ from: job.from, to: job.to, date, cabinCode: job.cabinCode, cabinName: job.cabinName });
     }
   }
+  tasks.sort((a, b) => a.date.localeCompare(b.date));
 
-  console.log(`[Parallel] ${tasks.length} search tasks across ${Math.min(maxSessions, tasks.length)} sessions`);
+  console.log(`[Parallel] ${tasks.length} search tasks across ${Math.min(maxSessions, tasks.length)} sessions (earliest dates first)`);
 
   // Split tasks into chunks for each session
   const numSessions = Math.min(maxSessions, tasks.length);
@@ -479,6 +480,7 @@ async function runParallel(jobs, maxSessions = 4) {
         return;
       }
 
+      let consecutiveRateLimits = 0;
       for (const task of chunk) {
         try {
           const { results } = await session.searchDate(task);
@@ -488,19 +490,37 @@ async function runParallel(jobs, maxSessions = 4) {
             date: task.date,
             results,
           });
+          consecutiveRateLimits = 0; // success — reset counter
         } catch (err) {
           session.log(`Error searching ${task.date}: ${err.message}`);
-          if (err.rateLimited) throw err; // Stop this session
+
+          if (err.rateLimited) {
+            consecutiveRateLimits++;
+            // Record this date as failed but continue
+            allResults.push({ route: `${task.from}→${task.to}`, cabin: task.cabinName, date: task.date, results: [], _rateLimited: true });
+
+            // After 3 consecutive rate limits, give up on this session
+            if (consecutiveRateLimits >= 3) {
+              session.log('3 consecutive rate limits — giving up on this session');
+              throw err;
+            }
+            // Back off and try next date
+            session.log(`Rate limit ${consecutiveRateLimits}/3 — backing off 30s before next search`);
+            await new Promise(r => setTimeout(r, 30000));
+            continue;
+          }
+
+          // Non-rate-limit error: record empty result and continue
           allResults.push({ route: `${task.from}→${task.to}`, cabin: task.cabinName, date: task.date, results: [] });
         }
 
-        // Delay between searches
-        await randomDelay(2000, 4000);
+        // Delay between searches — be gentle to avoid rate limiting
+        await randomDelay(5000, 10000);
       }
     } catch (err) {
       session.log(`Session error: ${err.message}`);
       allResults.push({ _sessionFailed: true, error: err.message, rateLimited: err.rateLimited, sessionId: i + 1 });
-      if (err.rateLimited) throw err;
+      // Don't re-throw — let other sessions continue. allSettled handles the rest.
     } finally {
       await session.close();
     }

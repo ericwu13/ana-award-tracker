@@ -6,7 +6,7 @@ const { runParallel } = require('./session');
 const { initDiscord, destroyDiscord, notifyAvailability, sendAlert, sendStatusUpdate } = require('./notifier');
 
 const { ANA_USERNAME, ANA_PASSWORD } = process.env;
-const MAX_SESSIONS = parseInt(process.env.MAX_SESSIONS || '4');
+const MAX_SESSIONS = parseInt(process.env.MAX_SESSIONS || '2');
 const SKIP_MIXED_CABIN = process.env.SKIP_MIXED_CABIN !== 'false'; // default: skip
 const MAX_LAYOVER_HOURS = parseInt(process.env.MAX_LAYOVER_HOURS || '30');
 const ALERT_WAITLIST = process.env.ALERT_WAITLIST !== 'false'; // default: alert waitlist too
@@ -182,9 +182,34 @@ async function main() {
   const state = loadState();
 
   try {
-    // Build search jobs: each route × its cabin classes
+    // Clean up expired dates first (anything before today PST)
+    const { cleanupExpiredDates, loadRoutes: reloadRoutes } = require('./routes');
+    const cleanup = cleanupExpiredDates();
+    if (cleanup.removedDates.length > 0) {
+      const summary = cleanup.removedDates.map(rd => `${rd.route} ${rd.date}`).join(', ');
+      console.log(`[Main] 🗑️ Removed ${cleanup.removedDates.length} expired date(s): ${summary}`);
+      await sendStatusUpdate(`🗑️ Auto-removed ${cleanup.removedDates.length} expired date(s): ${summary} (cleaned ${cleanup.removedFlights} cached flights)`);
+    }
+
+    // Reload routes after cleanup
+    const activeRoutes = reloadRoutes();
+    if (activeRoutes.length === 0) {
+      console.log('[Main] No routes to search.');
+      return;
+    }
+
+    // Check if session is known to be stale — don't waste time searching
+    const { isStale, getStaleInfo } = require('./session-stale');
+    if (isStale()) {
+      const info = getStaleInfo();
+      console.log(`[Main] Session is stale: ${info?.reason}. Skipping search.`);
+      await sendStatusUpdate(`⏸️ Search skipped — session stale: ${info?.reason}\nLog in to ANA in Chrome to resume.`);
+      return;
+    }
+
+    // Build search jobs from refreshed routes
     const jobs = [];
-    for (const route of ROUTES) {
+    for (const route of activeRoutes) {
       const cabins = getCabinsForRoute(route);
       for (const cabin of cabins) {
         jobs.push({
@@ -197,38 +222,33 @@ async function main() {
       }
     }
 
-    // Check if session is known to be stale — don't waste time searching
-    const { isStale, getStaleInfo } = require('./session-stale');
-    if (isStale()) {
-      const info = getStaleInfo();
-      console.log(`[Main] Session is stale: ${info?.reason}. Skipping search.`);
-      await sendStatusUpdate(`⏸️ Search skipped — session stale: ${info?.reason}\nLog in to ANA in Chrome to resume.`);
-      return;
-    }
-
-    // Refresh cookies right before searching — ensures they're fresh
-    console.log('[Main] Refreshing session before search...');
-    const { refreshSession } = require('./session-keepalive');
-    await refreshSession();
-
-    // Check again after refresh attempt
-    if (isStale()) {
-      console.log('[Main] Session went stale during refresh. Skipping search.');
-      return;
-    }
+    // Note: keep-alive in Discord bot refreshes cookies every 25 min.
+    // No pre-search refresh — that creates suspicious back-to-back browser launches.
 
     // Run all searches in parallel
     const startTime = Date.now();
     const allResults = await runParallel(jobs, MAX_SESSIONS);
     const elapsed = Math.round((Date.now() - startTime) / 1000);
 
-    // Check for session failures (cookie/login issues)
+    // Categorize session failures
     const sessionFailures = allResults.filter(r => r._sessionFailed);
     if (sessionFailures.length > 0) {
       const failCount = sessionFailures.length;
-      const reasons = [...new Set(sessionFailures.map(f => f.error))].join(', ');
-      console.error(`[Main] ⚠️ ${failCount} session(s) failed: ${reasons}`);
-      await sendAlert(`⚠️ ${failCount} search session(s) failed: ${reasons}\nCookies may have expired — visit ANA in Chrome to refresh.`);
+      const rateLimited = sessionFailures.filter(f => f.rateLimited || f.error === 'RATE_LIMITED');
+      const cookieIssues = sessionFailures.filter(f => !f.rateLimited && f.error !== 'RATE_LIMITED');
+
+      console.error(`[Main] ⚠️ ${failCount} session(s) failed (${rateLimited.length} rate-limited, ${cookieIssues.length} cookie/login)`);
+
+      if (rateLimited.length > 0 && cookieIssues.length === 0) {
+        // Pure rate limit — cookies are valid, ANA is throttling
+        await sendAlert(`⏳ ${failCount} search session(s) throttled by ANA. Cookies are valid; will retry next cycle.`);
+      } else if (cookieIssues.length > 0 && rateLimited.length === 0) {
+        // Pure cookie/login issue
+        await sendAlert(`⚠️ ${failCount} search session(s) failed: ${cookieIssues[0].error}\nLog in to ANA in Chrome to refresh cookies.`);
+      } else {
+        // Mixed
+        await sendAlert(`⚠️ ${failCount} search session(s) failed (${rateLimited.length} throttled, ${cookieIssues.length} cookie issue).`);
+      }
     }
 
     const validResults = allResults.filter(r => !r._sessionFailed);

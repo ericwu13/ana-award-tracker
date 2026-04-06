@@ -337,9 +337,76 @@ function formatRoutes() {
   return lines.join('\n');
 }
 
+/**
+ * Get today's date in YYYY-MM-DD format (PST timezone — relevant for ANA flights).
+ */
+function todayPST() {
+  const now = new Date();
+  // toLocaleDateString with en-CA gives YYYY-MM-DD
+  return now.toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+}
+
+/**
+ * Remove dates that are in the past from all routes, and clean up cached
+ * flights for those dates from state.json.
+ *
+ * Returns { removedDates: [{route, date}], removedFlights: number }
+ */
+function cleanupExpiredDates() {
+  const today = todayPST();
+  const routes = loadRoutes();
+  const removedDates = [];
+  let routesChanged = false;
+
+  for (const route of routes) {
+    const validDates = route.dates.filter(d => d >= today);
+    const expired = route.dates.filter(d => d < today);
+    if (expired.length > 0) {
+      route.dates = validDates;
+      routesChanged = true;
+      for (const d of expired) {
+        removedDates.push({ route: `${route.from}→${route.to}`, date: d });
+      }
+    }
+  }
+
+  if (routesChanged) {
+    // Drop empty routes (no dates left)
+    const nonEmpty = routes.filter(r => r.dates.length > 0);
+    saveRoutes(nonEmpty);
+  }
+
+  // Clean up cached flights for removed dates
+  let removedFlights = 0;
+  if (removedDates.length > 0) {
+    try {
+      const state = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+      if (state.flights) {
+        const removedKeys = new Set(removedDates.map(rd => `${rd.route}|${rd.date}`));
+        for (const key of Object.keys(state.flights)) {
+          // Key format: "ROUTE|DATE|flightnums"
+          const [route, date] = key.split('|');
+          if (removedKeys.has(`${route}|${date}`)) {
+            delete state.flights[key];
+            removedFlights++;
+          }
+        }
+        if (removedFlights > 0) {
+          fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+        }
+      }
+    } catch (e) {
+      console.log('[Routes] Could not clean state.json:', e.message);
+    }
+  }
+
+  return { removedDates, removedFlights };
+}
+
 module.exports = {
   loadRoutes, saveRoutes, seedRoutesIfNeeded,
   addRoute, removeRoute,
   parseDateInput, expandMonth, shortDate,
   getStatusSummary, formatStatus, formatRoutes, formatFlights,
+  cleanupExpiredDates, todayPST,
 };
