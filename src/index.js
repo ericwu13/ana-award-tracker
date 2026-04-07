@@ -10,6 +10,8 @@ const MAX_SESSIONS = parseInt(process.env.MAX_SESSIONS || '2');
 const SKIP_MIXED_CABIN = process.env.SKIP_MIXED_CABIN !== 'false'; // default: skip
 const MAX_LAYOVER_HOURS = parseInt(process.env.MAX_LAYOVER_HOURS || '30');
 const ALERT_WAITLIST = process.env.ALERT_WAITLIST !== 'false'; // default: alert waitlist too
+const SKIP_KNOWN_AVAILABLE = process.env.SKIP_KNOWN_AVAILABLE !== 'false'; // default: skip
+const RECHECK_HOURS = parseInt(process.env.RECHECK_HOURS || '4'); // re-check confirmed combos after this many hours
 
 if (!ANA_USERNAME || !ANA_PASSWORD) {
   console.error('ERROR: ANA_USERNAME and ANA_PASSWORD are required in .env');
@@ -118,6 +120,7 @@ function processResults(allResults, state) {
           status: currentStatus,
           route,
           date,
+          searchedCabin: cabin, // Economy or Business — for skip-known-available logic
           flightNumber: result.flightNumber,
           routeDesc: result.routeDesc,
           cabinDesc: result.cabinDesc,
@@ -143,24 +146,23 @@ function processResults(allResults, state) {
     }
   }
 
-  // Detect flights that disappeared — were tracked but not seen in this run
-  const searchedDates = new Set();
-  for (const { route, date, results } of allResults) {
-    // Only consider dates where we got actual results (not failed sessions)
+  // GONE detection: when we re-check a (route, date, cabin) combo and a
+  // previously-confirmed flight is no longer in the results, alert the user
+  // and remove it from state.
+  const searchedRouteDateCabin = new Set();
+  for (const { route, cabin, date, results } of allResults) {
     if (results && results.length > 0 && !results[0]?._sessionFailed) {
-      searchedDates.add(`${route}|${date}`);
+      searchedRouteDateCabin.add(`${route}|${date}|${cabin}`);
     }
   }
 
   for (const [key, flight] of Object.entries(state.flights)) {
-    const [route, date] = key.split('|');
-    const routeDate = `${route}|${date}`;
-
-    // Only mark gone if we actually searched this date and didn't find the flight
-    if (searchedDates.has(routeDate) && !seenKeys.has(key)) {
+    if (!flight.searchedCabin) continue; // legacy entry without cabin info → leave alone
+    const combo = `${flight.route}|${flight.date}|${flight.searchedCabin}`;
+    if (searchedRouteDateCabin.has(combo) && !seenKeys.has(key)) {
       if (flight.status === 'confirmed') {
-        console.log(`[Main] ❌ GONE: ${route} ${date} ${flight.flightNumber} was confirmed, now unavailable`);
-        sendAlert(`❌ **Seats gone**: ${flight.flightNumber} ${route} ${date}\n${flight.cabinDesc || ''} — no longer available`);
+        console.log(`[Main] ❌ GONE: ${flight.route} ${flight.date} ${flight.flightNumber} was confirmed, now unavailable`);
+        sendAlert(`❌ **Seats gone**: ${flight.flightNumber} ${flight.route} ${flight.date}\n${flight.cabinDesc || ''} — no longer available`);
       }
       delete state.flights[key];
     }
@@ -207,49 +209,111 @@ async function main() {
       return;
     }
 
-    // Build search jobs from refreshed routes
+    // Build set of (route, date, cabin) combos that have CONFIRMED flights
+    // recently enough to skip re-checking. Waitlist does NOT count.
+    const skipCombos = new Set();
+    let skippedDueToConfirmed = 0;
+    if (SKIP_KNOWN_AVAILABLE && state.flights) {
+      const recheckMs = RECHECK_HOURS * 60 * 60 * 1000;
+      const now = Date.now();
+      for (const flight of Object.values(state.flights)) {
+        if (flight.status !== 'confirmed') continue;
+        if (!flight.searchedCabin) continue; // legacy entry without cabin info → don't skip
+        const lastSeen = new Date(flight.lastSeen).getTime();
+        if (now - lastSeen > recheckMs) continue; // stale → re-check to detect changes
+        skipCombos.add(`${flight.route}|${flight.date}|${flight.searchedCabin}`);
+      }
+    }
+
+    // Build search jobs from refreshed routes, filtering out skip combos
     const jobs = [];
     for (const route of activeRoutes) {
       const cabins = getCabinsForRoute(route);
       for (const cabin of cabins) {
-        jobs.push({
-          from: route.from,
-          to: route.to,
-          dates: route.dates,
-          cabinCode: cabin.code,
-          cabinName: cabin.name,
+        const filteredDates = route.dates.filter(date => {
+          const combo = `${route.from}→${route.to}|${date}|${cabin.name}`;
+          if (skipCombos.has(combo)) {
+            skippedDueToConfirmed++;
+            return false;
+          }
+          return true;
         });
+        if (filteredDates.length > 0) {
+          jobs.push({
+            from: route.from,
+            to: route.to,
+            dates: filteredDates,
+            cabinCode: cabin.code,
+            cabinName: cabin.name,
+          });
+        }
       }
+    }
+
+    if (skippedDueToConfirmed > 0) {
+      console.log(`[Main] Skipping ${skippedDueToConfirmed} task(s) — already confirmed within ${RECHECK_HOURS}h`);
     }
 
     // Note: keep-alive in Discord bot refreshes cookies every 25 min.
     // No pre-search refresh — that creates suspicious back-to-back browser launches.
+
+    // Build expected task list (every route+date+cabin combo we plan to check)
+    const expectedTasks = new Map(); // key = "route|date|cabin" → status
+    for (const job of jobs) {
+      for (const date of job.dates) {
+        const key = `${job.from}→${job.to}|${date}|${job.cabinName}`;
+        expectedTasks.set(key, 'skipped'); // default until proven otherwise
+      }
+    }
+    const totalExpected = expectedTasks.size;
 
     // Run all searches in parallel
     const startTime = Date.now();
     const allResults = await runParallel(jobs, MAX_SESSIONS);
     const elapsed = Math.round((Date.now() - startTime) / 1000);
 
-    // Categorize session failures
-    const sessionFailures = allResults.filter(r => r._sessionFailed);
-    if (sessionFailures.length > 0) {
-      const failCount = sessionFailures.length;
-      const rateLimited = sessionFailures.filter(f => f.rateLimited || f.error === 'RATE_LIMITED');
-      const cookieIssues = sessionFailures.filter(f => !f.rateLimited && f.error !== 'RATE_LIMITED');
-
-      console.error(`[Main] ⚠️ ${failCount} session(s) failed (${rateLimited.length} rate-limited, ${cookieIssues.length} cookie/login)`);
-
-      if (rateLimited.length > 0 && cookieIssues.length === 0) {
-        // Pure rate limit — cookies are valid, ANA is throttling
-        await sendAlert(`⏳ ${failCount} search session(s) throttled by ANA. Cookies are valid; will retry next cycle.`);
-      } else if (cookieIssues.length > 0 && rateLimited.length === 0) {
-        // Pure cookie/login issue
-        await sendAlert(`⚠️ ${failCount} search session(s) failed: ${cookieIssues[0].error}\nLog in to ANA in Chrome to refresh cookies.`);
-      } else {
-        // Mixed
-        await sendAlert(`⚠️ ${failCount} search session(s) failed (${rateLimited.length} throttled, ${cookieIssues.length} cookie issue).`);
+    // Mark each task that was actually attempted
+    let checkedCount = 0;
+    let rateLimitedCount = 0;
+    for (const r of allResults) {
+      if (r._sessionFailed) continue;
+      const key = `${r.route}|${r.date}|${r.cabin}`;
+      if (expectedTasks.has(key)) {
+        if (r._rateLimited) {
+          expectedTasks.set(key, 'rate-limited');
+          rateLimitedCount++;
+        } else {
+          expectedTasks.set(key, 'checked');
+          checkedCount++;
+        }
       }
     }
+
+    // Anything still 'skipped' was never reached (session died before getting to it)
+    const skippedTasks = [...expectedTasks.entries()].filter(([, s]) => s === 'skipped').map(([k]) => k);
+    const skippedCount = skippedTasks.length;
+
+    // Categorize session failures
+    const sessionFailures = allResults.filter(r => r._sessionFailed);
+    const rateLimitedSessions = sessionFailures.filter(f => f.rateLimited || f.error === 'RATE_LIMITED');
+    const cookieIssues = sessionFailures.filter(f => !f.rateLimited && f.error !== 'RATE_LIMITED');
+    if (sessionFailures.length > 0) {
+      console.error(`[Main] ⚠️ ${sessionFailures.length} session(s) failed (${rateLimitedSessions.length} rate-limited, ${cookieIssues.length} cookie/login)`);
+      if (cookieIssues.length > 0) {
+        await sendAlert(`⚠️ ${cookieIssues.length} session(s) failed: ${cookieIssues[0].error}\nLog in to ANA in Chrome to refresh cookies.`);
+      }
+    }
+
+    // Save coverage to state for /status (cap skippedKeys to avoid unbounded growth)
+    state.lastCoverage = {
+      timestamp: new Date().toISOString(),
+      total: totalExpected,
+      checked: checkedCount,
+      rateLimited: rateLimitedCount,
+      skipped: skippedCount,
+      sessionsRateLimited: rateLimitedSessions.length,
+      skippedSample: skippedTasks.slice(0, 20),
+    };
 
     const validResults = allResults.filter(r => !r._sessionFailed);
     const alertsSent = processResults(validResults, state);
@@ -261,12 +325,32 @@ async function main() {
     const confirmed = Object.values(state.flights).filter(f => f.status === 'confirmed').length;
     const waitlisted = Object.values(state.flights).filter(f => f.status === 'waitlist').length;
 
-    console.log(`\n[Main] Check complete in ${elapsed}s. ${alertsSent} new alert(s). Tracking ${tracked} flights (${confirmed} confirmed, ${waitlisted} waitlist).`);
+    console.log(`\n[Main] Check complete in ${elapsed}s. ${alertsSent} new alert(s). Coverage: ${checkedCount}/${totalExpected} checked, ${rateLimitedCount} rate-limited, ${skippedCount} skipped. Tracking ${tracked} flights.`);
+
+    // Build a readable coverage line for Discord
+    let coverageMsg = `${checkedCount}/${totalExpected} checked`;
+    if (rateLimitedCount > 0) coverageMsg += `, ${rateLimitedCount} rate-limited`;
+    if (skippedCount > 0) coverageMsg += `, ${skippedCount} skipped`;
+    if (skippedDueToConfirmed > 0) coverageMsg += `, ${skippedDueToConfirmed} skipped (already confirmed)`;
+    if (rateLimitedSessions.length > 0) {
+      coverageMsg += ` (${rateLimitedSessions.length} session${rateLimitedSessions.length > 1 ? 's' : ''} hit ANA throttle)`;
+    }
+
+    // List up to 10 skipped tasks so user can see what was missed
+    let skippedDetail = '';
+    if (skippedCount > 0) {
+      const sample = skippedTasks.slice(0, 10).map(k => {
+        const [route, date, cabin] = k.split('|');
+        return `${route} ${date} ${cabin.charAt(0)}`;
+      }).join(', ');
+      skippedDetail = `\n⏭️ Skipped: ${sample}${skippedCount > 10 ? `, +${skippedCount - 10} more` : ''}`;
+    }
 
     const now = new Date().toLocaleString('en-US', { timeZone: 'America/Los_Angeles', hour: 'numeric', minute: '2-digit', hour12: true });
-    const statusMsg = alertsSent > 0
-      ? `✅ ANA check @ ${now} — ${alertsSent} new alert(s)! Tracking ${tracked} flights.`
-      : `🔍 ANA check @ ${now} — no changes. Tracking ${tracked} flights (${confirmed} confirmed, ${waitlisted} waitlist).`;
+    const headline = alertsSent > 0
+      ? `✅ ANA check @ ${now} — ${alertsSent} new alert(s)!`
+      : `🔍 ANA check @ ${now} — no changes`;
+    const statusMsg = `${headline}\nCoverage: ${coverageMsg}\nTracking: ${tracked} flights (${confirmed} confirmed, ${waitlisted} waitlist)${skippedDetail}`;
     await sendStatusUpdate(statusMsg);
   } catch (err) {
     console.error('[Main] Check failed:', err.message);

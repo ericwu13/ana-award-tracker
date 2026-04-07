@@ -11,13 +11,13 @@ const STATE_FILE = path.join(__dirname, '..', 'data', 'state.json');
 /**
  * Expand a month string (e.g., "2026-10") into dates covering the month.
  * Each date gets its own direct search (no calendar ±3 day view).
- * Dates every 3 days for good coverage without too many searches.
+ * Dates every 7 days to keep request load manageable under ANA's rate limits.
  */
 function expandMonth(yearMonth) {
   const [year, month] = yearMonth.split('-').map(Number);
   const daysInMonth = new Date(year, month, 0).getDate();
   const dates = [];
-  for (let day = 1; day <= daysInMonth; day += 3) {
+  for (let day = 1; day <= daysInMonth; day += 7) {
     const mm = String(month).padStart(2, '0');
     const dd = String(day).padStart(2, '0');
     dates.push(`${year}-${mm}-${dd}`);
@@ -342,30 +342,44 @@ function formatRoutes() {
  */
 function todayPST() {
   const now = new Date();
-  // toLocaleDateString with en-CA gives YYYY-MM-DD
   return now.toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
 }
 
 /**
- * Remove dates that are in the past from all routes, and clean up cached
- * flights for those dates from state.json.
+ * Get the minimum bookable date (today + ANA's 96-hour booking deadline).
+ * ANA requires award bookings at least 96 hours before boarding.
+ * We use 4 full days as the cutoff (with a buffer for timezone slop).
+ */
+function minBookableDate() {
+  const days = parseInt(process.env.MIN_BOOK_LEAD_DAYS || '4');
+  const now = new Date();
+  // Get today in PST
+  const todayStr = todayPST(); // YYYY-MM-DD
+  const [y, m, d] = todayStr.split('-').map(Number);
+  const future = new Date(Date.UTC(y, m - 1, d + days));
+  return future.toISOString().substring(0, 10);
+}
+
+/**
+ * Remove dates that can't be booked (in the past OR within ANA's 96-hour window),
+ * and clean up cached flights for those dates from state.json.
  *
- * Returns { removedDates: [{route, date}], removedFlights: number }
+ * Returns { removedDates: [{route, date, reason}], removedFlights: number }
  */
 function cleanupExpiredDates() {
-  const today = todayPST();
+  const minDate = minBookableDate();
   const routes = loadRoutes();
   const removedDates = [];
   let routesChanged = false;
 
   for (const route of routes) {
-    const validDates = route.dates.filter(d => d >= today);
-    const expired = route.dates.filter(d => d < today);
+    const validDates = route.dates.filter(d => d >= minDate);
+    const expired = route.dates.filter(d => d < minDate);
     if (expired.length > 0) {
       route.dates = validDates;
       routesChanged = true;
       for (const d of expired) {
-        removedDates.push({ route: `${route.from}→${route.to}`, date: d });
+        removedDates.push({ route: `${route.from}→${route.to}`, date: d, reason: 'unbookable (past or within 96h)' });
       }
     }
   }
@@ -408,5 +422,5 @@ module.exports = {
   addRoute, removeRoute,
   parseDateInput, expandMonth, shortDate,
   getStatusSummary, formatStatus, formatRoutes, formatFlights,
-  cleanupExpiredDates, todayPST,
+  cleanupExpiredDates, todayPST, minBookableDate,
 };

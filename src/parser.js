@@ -27,6 +27,11 @@ async function parseResults(page, cabinName = 'Economy') {
   const bodyText = await page.evaluate(() => document.body?.innerText || '');
   const pageUrl = await page.url();
 
+  // ANA's 96-hour booking deadline error — date is too close to departure
+  if (bodyText.includes('E_A01P01_0008') || bodyText.includes('application deadline has passed')) {
+    return [{ noResults: true, unbookable: true, reason: '96-hour booking deadline' }];
+  }
+
   // Quick "no results" check before heavy parsing
   const noResultPatterns = [
     '合うものがありませんでした',

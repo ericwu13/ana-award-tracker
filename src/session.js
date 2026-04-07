@@ -17,13 +17,24 @@ function randomDelay(minMs = 2000, maxMs = 5000) {
 async function isRateLimited(page) {
   return page.evaluate(() => {
     const text = document.body?.innerText || '';
+    const title = document.title || '';
+
+    // Match by message content
     const hasBlockMessage =
       text.includes('Your request cannot be accepted at this time') ||
-      text.includes('ただいま大変混み合っているか、コンピュータの調整中です');
-    if (!hasBlockMessage) return false;
-    const inputCount = document.querySelectorAll('input, select, textarea').length;
+      text.includes('ただいま大変混み合っているか、コンピュータの調整中です') ||
+      text.includes('heavy traffic or server maintenance') ||
+      text.includes('Please try at a later time');
+
+    // Also match by ANA's "Information" error page title
+    const hasErrorTitle = title.includes('ご案内') || title.includes('Information');
+
+    if (!hasBlockMessage && !hasErrorTitle) return false;
+    if (!hasBlockMessage) return false; // need message text to confirm
+
+    // The error page has minimal content — no search form, no login form
     const hasSearchForm = !!document.querySelector('#departureAirportCode\\:field_pctext, #accountNumber, form[action*="award"]');
-    return inputCount === 0 && !hasSearchForm;
+    return !hasSearchForm;
   });
 }
 
@@ -409,6 +420,16 @@ class Session {
       throw err;
     }
 
+    // Check for ANA's 96-hour booking deadline error before parsing
+    const unbookable = await page.evaluate(() => {
+      const text = document.body?.innerText || '';
+      return text.includes('E_A01P01_0008') || text.includes('application deadline has passed');
+    });
+    if (unbookable) {
+      this.log(`Date ${date} unbookable (within 96-hour deadline)`);
+      return { results: [{ noResults: true, unbookable: true, reason: '96-hour deadline' }], needsLogin: false };
+    }
+
     // We should be on the flight detail page (not calendar, since we unchecked comparison)
     // Parse flight details directly
     const detailResults = await parseFlightDetails(page, cabinName);
@@ -459,12 +480,32 @@ async function runParallel(jobs, maxSessions = 4) {
   }
   tasks.sort((a, b) => a.date.localeCompare(b.date));
 
-  console.log(`[Parallel] ${tasks.length} search tasks across ${Math.min(maxSessions, tasks.length)} sessions (earliest dates first)`);
+  // Shuffle tasks within each date group to break cabin/route segregation across sessions.
+  // Without this, the stable sort + insertion order causes all Economy tasks to land on
+  // one session and all Business on the other → if one session hits rate limit, an entire
+  // cabin gets skipped. Shuffle within date keeps "earliest date first" but mixes cabins.
+  const dateGroups = new Map();
+  for (const t of tasks) {
+    if (!dateGroups.has(t.date)) dateGroups.set(t.date, []);
+    dateGroups.get(t.date).push(t);
+  }
+  const shuffled = [];
+  for (const date of [...dateGroups.keys()].sort()) {
+    const group = dateGroups.get(date);
+    // Fisher-Yates shuffle within this date
+    for (let i = group.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [group[i], group[j]] = [group[j], group[i]];
+    }
+    shuffled.push(...group);
+  }
 
-  // Split tasks into chunks for each session
-  const numSessions = Math.min(maxSessions, tasks.length);
+  console.log(`[Parallel] ${shuffled.length} search tasks across ${Math.min(maxSessions, shuffled.length)} sessions (earliest first, cabins shuffled)`);
+
+  // Round-robin distribution. With shuffled cabins, each session gets a fair mix.
+  const numSessions = Math.min(maxSessions, shuffled.length);
   const chunks = Array.from({ length: numSessions }, () => []);
-  tasks.forEach((task, i) => chunks[i % numSessions].push(task));
+  shuffled.forEach((task, i) => chunks[i % numSessions].push(task));
 
   // Launch sessions and run in parallel
   const workers = chunks.map(async (chunk, i) => {
