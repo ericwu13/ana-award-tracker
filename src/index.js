@@ -321,6 +321,26 @@ async function main() {
     saveState(state);
 
     // Summary
+    // Count only flights for currently-tracked routes/dates so this matches /status.
+    // Also opportunistically prune orphaned entries (routes/dates removed since last run).
+    const validRouteDates = new Set();
+    for (const route of activeRoutes) {
+      for (const date of route.dates) {
+        validRouteDates.add(`${route.from}→${route.to}|${date}`);
+      }
+    }
+    let prunedOrphans = 0;
+    for (const key of Object.keys(state.flights)) {
+      const [route, date] = key.split('|');
+      if (!validRouteDates.has(`${route}|${date}`)) {
+        delete state.flights[key];
+        prunedOrphans++;
+      }
+    }
+    if (prunedOrphans > 0) {
+      console.log(`[Main] Pruned ${prunedOrphans} orphaned flight(s) from state`);
+    }
+
     const tracked = Object.keys(state.flights).length;
     const confirmed = Object.values(state.flights).filter(f => f.status === 'confirmed').length;
     const waitlisted = Object.values(state.flights).filter(f => f.status === 'waitlist').length;
