@@ -179,21 +179,26 @@ function getStatusSummary() {
       });
 
       if (matching.length === 0) {
-        dateSummaries.push({ date, ecoCount: 0, bizCount: 0 });
+        dateSummaries.push({ date, peCount: 0, ecoCount: 0, bizCount: 0 });
         continue;
       }
 
-      // Split by cabin class
+      // Split by cabin class. "Premium Economy" must be checked BEFORE "Economy"
+      // because the substring "economy" is contained in "premium economy".
+      const pe = matching.filter(([, f]) => {
+        const desc = (f.cabinDesc || '').toLowerCase();
+        return desc.includes('premium economy');
+      });
       const eco = matching.filter(([, f]) => {
         const desc = (f.cabinDesc || '').toLowerCase();
-        return desc.includes('economy') && !desc.includes('business');
+        return desc.includes('economy') && !desc.includes('premium') && !desc.includes('business');
       });
       const biz = matching.filter(([, f]) => {
         const desc = (f.cabinDesc || '').toLowerCase();
         return desc.includes('business');
       });
 
-      dateSummaries.push({ date, ecoCount: eco.length, bizCount: biz.length });
+      dateSummaries.push({ date, peCount: pe.length, ecoCount: eco.length, bizCount: biz.length });
     }
 
     summary.push({ route: routeLabel, from: route.from, to: route.to, dates: dateSummaries });
@@ -217,7 +222,7 @@ function shortDate(dateStr) {
 
 /**
  * Format a compact status summary for Discord.
- * Shows confirmed seats split by Economy/Business. Skips waitlist.
+ * Shows confirmed seats split by Premium Economy/Economy/Business. Skips waitlist.
  */
 function formatStatus() {
   const { lastCheck, summary } = getStatusSummary();
@@ -232,17 +237,18 @@ function formatStatus() {
   for (const route of summary) {
     lines.push(`**${route.route}**`);
     lines.push('```');
-    lines.push('Date       Eco  Biz');
-    lines.push('─────────────────────');
+    lines.push('Date        PE   Eco  Biz');
+    lines.push('──────────────────────────');
 
     for (const ds of route.dates) {
       const dateLabel = shortDate(ds.date).padEnd(10);
-      if (ds.ecoCount === 0 && ds.bizCount === 0) {
-        lines.push(`${dateLabel}  ❌    ❌`);
+      if (ds.peCount === 0 && ds.ecoCount === 0 && ds.bizCount === 0) {
+        lines.push(`${dateLabel}  ❌    ❌    ❌`);
       } else {
+        const pe  = ds.peCount  > 0 ? `${ds.peCount} ✅`  : ' ❌ ';
         const eco = ds.ecoCount > 0 ? `${ds.ecoCount} ✅` : ' ❌ ';
         const biz = ds.bizCount > 0 ? `${ds.bizCount} ✅` : ' ❌ ';
-        lines.push(`${dateLabel}${eco.padStart(5)}  ${biz.padStart(5)}`);
+        lines.push(`${dateLabel}${pe.padStart(5)} ${eco.padStart(5)} ${biz.padStart(5)}`);
       }
     }
 
@@ -280,11 +286,16 @@ function formatFlights(from, to, dateInput, cabin) {
     return true;
   });
 
-  // Filter by cabin if specified
+  // Filter by cabin if specified. "Economy" must not match "Premium Economy",
+  // so we use exact-class matching instead of substring.
   const filtered = cabin
     ? matching.filter(([, f]) => {
         const desc = (f.cabinDesc || '').toLowerCase();
-        return desc.includes(cabin.toLowerCase());
+        const wanted = cabin.toLowerCase();
+        if (wanted === 'premium economy') return desc.includes('premium economy');
+        if (wanted === 'economy')         return desc.includes('economy') && !desc.includes('premium') && !desc.includes('business');
+        if (wanted === 'business')        return desc.includes('business');
+        return desc.includes(wanted);
       })
     : matching;
 
@@ -331,7 +342,10 @@ function formatRoutes() {
   const lines = ['📋 **Tracked Routes**', ''];
   for (const r of routes) {
     const dates = r.dates.map(d => shortDate(d)).join(', ');
-    const cabin = r.cabin === 'economy' ? '(Eco)' : r.cabin === 'business' ? '(Biz)' : '(Eco+Biz)';
+    const cabin = r.cabin === 'economy' ? '(Eco)'
+                : r.cabin === 'business' ? '(Biz)'
+                : r.cabin === 'premium-economy' ? '(PE)'
+                : '(PE+Biz)';
     lines.push(`**${r.from}→${r.to}** ${cabin}: ${dates}`);
   }
   return lines.join('\n');

@@ -467,40 +467,43 @@ class Session {
  * @param {number} maxSessions - Max concurrent browser sessions
  * @returns {Array} All results: [{ route, cabin, date, results }]
  */
-async function runParallel(jobs, maxSessions = 4) {
+async function runParallel(jobs, maxSessions = 4, lastChecked = {}) {
   const allResults = [];
   const sessions = [];
 
-  // Flatten jobs into individual search tasks, sorted by date (earliest first)
+  // Flatten jobs into individual search tasks
   const tasks = [];
   for (const job of jobs) {
     for (const date of job.dates) {
       tasks.push({ from: job.from, to: job.to, date, cabinCode: job.cabinCode, cabinName: job.cabinName });
     }
   }
-  tasks.sort((a, b) => a.date.localeCompare(b.date));
 
-  // Shuffle tasks within each date group to break cabin/route segregation across sessions.
-  // Without this, the stable sort + insertion order causes all Economy tasks to land on
-  // one session and all Business on the other → if one session hits rate limit, an entire
-  // cabin gets skipped. Shuffle within date keeps "earliest date first" but mixes cabins.
-  const dateGroups = new Map();
+  // Prioritize oldest-checked (and never-checked) tasks first to prevent starvation.
+  // Without this, the stable date-sort meant later dates (e.g. October) were always
+  // at the back of the queue and got skipped whenever sessions hit Akamai throttle.
+  // Bucket by lastChecked timestamp (rounded) so ties get shuffled — this also breaks
+  // up cabin/route segregation so a single session failure doesn't wipe out one cabin.
+  const taskKey = t => `${t.from}→${t.to}|${t.date}|${t.cabinName}`;
+  const buckets = new Map();
   for (const t of tasks) {
-    if (!dateGroups.has(t.date)) dateGroups.set(t.date, []);
-    dateGroups.get(t.date).push(t);
+    const ts = lastChecked[taskKey(t)] || 0;
+    if (!buckets.has(ts)) buckets.set(ts, []);
+    buckets.get(ts).push(t);
   }
+  const sortedTimestamps = [...buckets.keys()].sort((a, b) => a - b);
   const shuffled = [];
-  for (const date of [...dateGroups.keys()].sort()) {
-    const group = dateGroups.get(date);
-    // Fisher-Yates shuffle within this date
+  for (const ts of sortedTimestamps) {
+    const group = buckets.get(ts);
+    // Fisher-Yates shuffle within tied tasks
     for (let i = group.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
       [group[i], group[j]] = [group[j], group[i]];
     }
     shuffled.push(...group);
   }
-
-  console.log(`[Parallel] ${shuffled.length} search tasks across ${Math.min(maxSessions, shuffled.length)} sessions (earliest first, cabins shuffled)`);
+  const neverChecked = (buckets.get(0) || []).length;
+  console.log(`[Parallel] ${shuffled.length} search tasks across ${Math.min(maxSessions, shuffled.length)} sessions (oldest-checked first, ${neverChecked} never checked)`);
 
   // Round-robin distribution. With shuffled cabins, each session gets a fair mix.
   const numSessions = Math.min(maxSessions, shuffled.length);

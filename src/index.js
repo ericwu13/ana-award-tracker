@@ -22,15 +22,17 @@ const { loadRoutes } = require('./routes');
 
 const STATE_FILE = path.join(__dirname, '..', 'data', 'state.json');
 const ROUTES = loadRoutes();
-const ALL_CABINS = [
-  { code: 'CFF1', name: 'Economy' },
-  { code: 'CFF2', name: 'Business' },
-];
+const CABIN_PE  = { code: 'CFF4', name: 'Premium Economy' };
+const CABIN_ECO = { code: 'CFF1', name: 'Economy' };
+const CABIN_BIZ = { code: 'CFF2', name: 'Business' };
 
 function getCabinsForRoute(route) {
-  if (route.cabin === 'economy') return [ALL_CABINS[0]];
-  if (route.cabin === 'business') return [ALL_CABINS[1]];
-  return ALL_CABINS; // 'both' or undefined
+  // Explicit single-cabin selection
+  if (route.cabin === 'economy')         return [CABIN_ECO];
+  if (route.cabin === 'business')        return [CABIN_BIZ];
+  if (route.cabin === 'premium-economy') return [CABIN_PE];
+  // Default ('both' or undefined) → Premium Economy + Business
+  return [CABIN_PE, CABIN_BIZ];
 }
 
 function loadState() {
@@ -269,7 +271,8 @@ async function main() {
 
     // Run all searches in parallel
     const startTime = Date.now();
-    const allResults = await runParallel(jobs, MAX_SESSIONS);
+    if (!state.lastChecked) state.lastChecked = {};
+    const allResults = await runParallel(jobs, MAX_SESSIONS, state.lastChecked);
     const elapsed = Math.round((Date.now() - startTime) / 1000);
 
     // Mark each task that was actually attempted
@@ -284,6 +287,7 @@ async function main() {
           rateLimitedCount++;
         } else {
           expectedTasks.set(key, 'checked');
+          state.lastChecked[key] = Date.now();
           checkedCount++;
         }
       }
