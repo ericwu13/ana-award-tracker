@@ -51,22 +51,48 @@ function startCookieServer() {
             return;
           }
 
-          // Validate key cookies are present
+          // Validate key cookies are present in the incoming push
           const missing = KEY_COOKIES.filter(name => !cookies.some(c => c.name === name));
+
+          // If the push is missing key cookies, preserve them from the existing
+          // file instead of destroying them. The extension can briefly push an
+          // incomplete batch (e.g. between Chrome events) and we don't want a
+          // single bad push to wipe a working `personal` cookie permanently.
+          let finalCookies = cookies;
+          let preservedCount = 0;
           if (missing.length > 0) {
-            console.log(`[CookieServer] ⚠️ Missing key cookies: ${missing.join(', ')} — session may be expired`);
+            try {
+              const existing = JSON.parse(fs.readFileSync(COOKIE_PATH, 'utf8'));
+              const preserved = existing.filter(c => missing.includes(c.name));
+              if (preserved.length > 0) {
+                finalCookies = [...cookies, ...preserved];
+                preservedCount = preserved.length;
+              }
+            } catch {
+              // No existing file or unreadable — fall through with what we have
+            }
           }
 
+          // Re-evaluate after merge: do we now have all key cookies on disk?
+          const finalMissing = KEY_COOKIES.filter(name => !finalCookies.some(c => c.name === name));
+
           fs.mkdirSync(path.dirname(COOKIE_PATH), { recursive: true });
-          fs.writeFileSync(COOKIE_PATH, JSON.stringify(cookies, null, 2));
+          fs.writeFileSync(COOKIE_PATH, JSON.stringify(finalCookies, null, 2));
           lastPushTime = Date.now();
 
-          // Clear stale flag — fresh cookies from Chrome mean session is valid again
-          if (missing.length === 0) clearStale();
+          // Clear stale flag only when we have a fully valid set
+          if (finalMissing.length === 0) clearStale();
 
-          console.log(`[CookieServer] Received ${cookies.length} cookies (${missing.length === 0 ? 'valid' : 'INCOMPLETE'})`);
+          if (missing.length === 0) {
+            console.log(`[CookieServer] Received ${cookies.length} cookies (valid)`);
+          } else if (preservedCount > 0) {
+            console.log(`[CookieServer] Received ${cookies.length} cookies, push missing ${missing.join(',')} — preserved ${preservedCount} from existing (final missing: ${finalMissing.join(',') || 'none'})`);
+          } else {
+            console.log(`[CookieServer] Received ${cookies.length} cookies, INCOMPLETE — still missing ${finalMissing.join(',')}`);
+          }
+
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: true, count: cookies.length, missing }));
+          res.end(JSON.stringify({ ok: true, count: finalCookies.length, missing: finalMissing, preserved: preservedCount }));
         } catch (e) {
           res.writeHead(400);
           res.end(e.message);

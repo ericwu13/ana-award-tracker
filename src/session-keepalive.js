@@ -83,12 +83,19 @@ async function refreshSession() {
     const url = await page.url();
     console.log(`[KeepAlive] Landed on: ${url}`);
 
-    // Check if we reached the search form (session is valid)
-    const isOnSearchForm = await page.evaluate(() => {
-      const text = document.body.innerText || '';
-      return text.includes('Departure') || text.includes('Origin') ||
-             text.includes('Award Reservation') || text.includes('出発地');
+    // Check if we reached the search form (session is valid).
+    // Use the actual departure airport input field as the canonical signal —
+    // matches what session.js checks at runtime. Text-based checks were
+    // false-positive matching login pages whose nav/breadcrumb contained
+    // "Departure"/"Award Reservation", which prevented the re-auth path
+    // from ever firing when the session actually expired.
+    const formCheck = await page.evaluate(() => {
+      return {
+        hasDepartureInput: !!document.querySelector('#departureAirportCode\\:field_pctext'),
+        hasPasswordField: !!document.querySelector('#password'),
+      };
     });
+    const isOnSearchForm = formCheck.hasDepartureInput && !formCheck.hasPasswordField;
 
     if (isOnSearchForm) {
       // Session is alive! Grab fresh cookies and save
