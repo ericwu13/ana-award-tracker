@@ -16,6 +16,7 @@ const commands = [
     .addStringOption(opt => opt.setName('date').setDescription('YYYY-MM-DD for a date, YYYY-MM for whole month (e.g., 2026-10-15 or 2026-10)').setRequired(true))
     .addStringOption(opt => opt.setName('cabin').setDescription('Cabin class to track (default: Premium Eco + Business)').setRequired(false).addChoices(
       { name: 'Premium Eco + Business (default)', value: 'both' },
+      { name: 'All three (PE + Economy + Business)', value: 'all' },
       { name: 'Economy only', value: 'economy' },
       { name: 'Business only', value: 'business' },
       { name: 'Premium Economy only', value: 'premium-economy' },
@@ -23,10 +24,15 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName('untrack')
-    .setDescription('Remove a route or date from tracking')
+    .setDescription('Remove a route, date, or just a specific cabin from a date')
     .addStringOption(opt => opt.setName('from').setDescription('Departure airport code (e.g., TPE)').setRequired(true))
     .addStringOption(opt => opt.setName('to').setDescription('Arrival airport code (e.g., SFO)').setRequired(true))
-    .addStringOption(opt => opt.setName('date').setDescription('YYYY-MM-DD or YYYY-MM to remove (omit to remove entire route)').setRequired(false)),
+    .addStringOption(opt => opt.setName('date').setDescription('YYYY-MM-DD or YYYY-MM to remove (omit to remove entire route)').setRequired(false))
+    .addStringOption(opt => opt.setName('cabin').setDescription('Optional: remove only this cabin from the date(s)').setRequired(false).addChoices(
+      { name: 'Premium Economy', value: 'premium-economy' },
+      { name: 'Economy', value: 'economy' },
+      { name: 'Business', value: 'business' },
+    )),
 
   new SlashCommandBuilder()
     .setName('routes')
@@ -109,20 +115,31 @@ async function handleCommand(interaction, triggerCheck) {
       return;
     }
 
-    const { addedDates, totalDates } = addRoute(from, to, dates, cabin);
-    const datesStr = dates.map(d => `\`${d}\``).join(', ');
+    const { newlyAddedDates, updatedDates, totalDates } = addRoute(from, to, dates, cabin);
 
     const cabinLabels = {
       'both': 'Premium Eco+Business',
+      'all': 'PE+Economy+Business',
       'economy': 'Economy',
       'business': 'Business',
       'premium-economy': 'Premium Economy',
     };
     const cabinLabel = cabinLabels[cabin] || 'Premium Eco+Business';
-    if (addedDates.length === 0) {
-      await interaction.reply(`Already tracking ${from}→${to} (${cabinLabel}) on those dates. (${totalDates} dates total)`);
+
+    if (newlyAddedDates.length === 0 && updatedDates.length === 0) {
+      await interaction.reply(`ℹ️ Already tracking **${from}→${to}** with those cabins on those dates. (${totalDates} dates total)`);
     } else {
-      await interaction.reply(`✅ Added **${from}→${to}** (${cabinLabel}) for ${datesStr}\n${addedDates.length} new date(s), ${totalDates} total.`);
+      const lines = [`✅ Updated **${from}→${to}**:`];
+      if (newlyAddedDates.length > 0) {
+        const dateStr = newlyAddedDates.slice().sort().map(d => `\`${d}\``).join(', ');
+        lines.push(`  • Added ${newlyAddedDates.length} new date(s) with ${cabinLabel}: ${dateStr}`);
+      }
+      if (updatedDates.length > 0) {
+        const dateStr = updatedDates.slice().sort().map(d => `\`${d}\``).join(', ');
+        lines.push(`  • Added ${cabinLabel} cabin(s) to ${updatedDates.length} existing date(s): ${dateStr}`);
+      }
+      lines.push(`${totalDates} dates total.`);
+      await interaction.reply(lines.join('\n'));
     }
   }
 
@@ -130,6 +147,7 @@ async function handleCommand(interaction, triggerCheck) {
     const from = interaction.options.getString('from').toUpperCase();
     const to = interaction.options.getString('to').toUpperCase();
     const dateInput = interaction.options.getString('date');
+    const cabin = interaction.options.getString('cabin'); // optional
 
     let dates = null;
     if (dateInput) {
@@ -140,36 +158,49 @@ async function handleCommand(interaction, triggerCheck) {
       }
     }
 
-    const { removed, remainingDates } = removeRoute(from, to, dates);
-    if (!removed) {
+    const result = removeRoute(from, to, dates, cabin);
+    if (!result.removed) {
       await interaction.reply(`❌ Route ${from}→${to} not found.`);
-    } else {
-      // Clean cached flight data for removed dates
-      const fs = require('fs');
-      const path = require('path');
-      const stateFile = path.join(__dirname, '..', 'data', 'state.json');
-      try {
-        const state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
-        const routeLabel = `${from}→${to}`;
-        let cleaned = 0;
-        for (const key of Object.keys(state.flights || {})) {
-          const shouldDelete = dates
-            ? dates.some(d => key.startsWith(`${routeLabel}|${d}|`))
-            : key.startsWith(`${routeLabel}|`);
-          if (shouldDelete) { delete state.flights[key]; cleaned++; }
-        }
-        if (cleaned > 0) fs.writeFileSync(stateFile, JSON.stringify(state, null, 2));
-        const cleanedMsg = cleaned > 0 ? ` Cleared ${cleaned} cached flights.` : '';
-        if (!dates) {
-          await interaction.reply(`✅ Removed entire route **${from}→${to}**.${cleanedMsg}`);
-        } else {
-          await interaction.reply(`✅ Removed dates from **${from}→${to}**. ${remainingDates} dates remaining.${cleanedMsg}`);
-        }
-      } catch {
-        await interaction.reply(!dates
-          ? `✅ Removed entire route **${from}→${to}**.`
-          : `✅ Removed dates from **${from}→${to}**. ${remainingDates} dates remaining.`);
+      return;
+    }
+
+    // Clean cached flight data for dates that were fully removed (not for
+    // cabin-only removals, since the date is still tracked in other cabins).
+    const fs = require('fs');
+    const path = require('path');
+    const stateFile = path.join(__dirname, '..', 'data', 'state.json');
+    let cleaned = 0;
+    try {
+      const state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+      const routeLabel = `${from}→${to}`;
+      const datesToClean = result.removedEntireRoute
+        ? null  // wipe all route keys
+        : result.removedDates;
+      for (const key of Object.keys(state.flights || {})) {
+        const shouldDelete = datesToClean === null
+          ? key.startsWith(`${routeLabel}|`)
+          : datesToClean.some(d => key.startsWith(`${routeLabel}|${d}|`));
+        if (shouldDelete) { delete state.flights[key]; cleaned++; }
       }
+      if (cleaned > 0) fs.writeFileSync(stateFile, JSON.stringify(state, null, 2));
+    } catch {
+      // state.json unreadable — proceed with just the route removal reply
+    }
+
+    const cleanedMsg = cleaned > 0 ? ` Cleared ${cleaned} cached flights.` : '';
+    const cabinLabels = { 'premium-economy': 'Premium Economy', 'economy': 'Economy', 'business': 'Business' };
+    const cabinLabel = cabin ? cabinLabels[cabin] || cabin : null;
+
+    if (result.removedEntireRoute) {
+      await interaction.reply(`✅ Removed entire route **${from}→${to}**.${cleanedMsg}`);
+    } else if (cabinLabel && result.updatedDates.length > 0 && result.removedDates.length === 0) {
+      await interaction.reply(`✅ Removed ${cabinLabel} from ${result.updatedDates.length} date(s) on **${from}→${to}**. ${result.remainingDates} dates remaining.${cleanedMsg}`);
+    } else if (cabinLabel && result.removedDates.length > 0) {
+      await interaction.reply(`✅ Removed ${cabinLabel} from ${result.updatedDates.length + result.removedDates.length} date(s); ${result.removedDates.length} date(s) became empty and were deleted. **${from}→${to}** has ${result.remainingDates} dates remaining.${cleanedMsg}`);
+    } else if (result.removedDates.length > 0) {
+      await interaction.reply(`✅ Removed ${result.removedDates.length} date(s) from **${from}→${to}**. ${result.remainingDates} dates remaining.${cleanedMsg}`);
+    } else {
+      await interaction.reply(`ℹ️ No matching ${cabinLabel || 'date'}(s) found on **${from}→${to}**. ${result.remainingDates} dates remaining.`);
     }
   }
 

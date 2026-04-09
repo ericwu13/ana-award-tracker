@@ -26,14 +26,12 @@ const CABIN_PE  = { code: 'CFF4', name: 'Premium Economy' };
 const CABIN_ECO = { code: 'CFF1', name: 'Economy' };
 const CABIN_BIZ = { code: 'CFF2', name: 'Business' };
 
-function getCabinsForRoute(route) {
-  // Explicit single-cabin selection
-  if (route.cabin === 'economy')         return [CABIN_ECO];
-  if (route.cabin === 'business')        return [CABIN_BIZ];
-  if (route.cabin === 'premium-economy') return [CABIN_PE];
-  // Default ('both' or undefined) → Premium Economy + Business
-  return [CABIN_PE, CABIN_BIZ];
-}
+// Map storage key (routes.json) → search cabin object
+const CABIN_BY_KEY = {
+  'premium-economy': CABIN_PE,
+  'economy':         CABIN_ECO,
+  'business':        CABIN_BIZ,
+};
 
 function loadState() {
   try {
@@ -113,7 +111,7 @@ function processResults(allResults, state) {
 
       if (!prev) {
         // NEW flight — alert!
-        console.log(`[Main] 🎉 NEW ${currentStatus}: ${route} ${date} ${result.flightNumber || result.cabin} ${result.routeDesc || ''}`);
+        console.log(`[Main] 🎉 NEW ${currentStatus}: ${route} ${date} ${result.flightNumber || result.cabin} ${result.routeDesc || ''}${result.miles ? ` (${result.miles.toLocaleString()} miles)` : ''}`);
         const sent = notifyAvailability(date, result, route);
         if (sent) alertsSent++;
         state.flights[key] = {
@@ -127,6 +125,7 @@ function processResults(allResults, state) {
           routeDesc: result.routeDesc,
           cabinDesc: result.cabinDesc,
           duration: result.duration,
+          miles: result.miles ?? null,
         };
       } else if (prev.status === 'waitlist' && currentStatus === 'confirmed') {
         // UPGRADE — was waitlisted, now confirmed! Alert!
@@ -135,15 +134,28 @@ function processResults(allResults, state) {
         if (sent) alertsSent++;
         prev.status = 'confirmed';
         prev.lastSeen = new Date().toISOString();
+        if (result.miles != null) prev.miles = result.miles;
       } else if (prev.status === 'confirmed' && currentStatus === 'waitlist') {
         // DOWNGRADE — was confirmed, now waitlist only
         console.log(`[Main] ⚠️ DOWNGRADE: ${route} ${date} ${result.flightNumber} confirmed → waitlist`);
         prev.status = 'waitlist';
         prev.lastSeen = new Date().toISOString();
+        if (result.miles != null) prev.miles = result.miles;
         // Don't alert downgrades — too noisy
       } else {
         // STILL AVAILABLE — same status, don't alert
         prev.lastSeen = new Date().toISOString();
+
+        // Detect and log miles price changes (useful signal — ANA can adjust
+        // award pricing, and the user may want to know if a tracked flight
+        // got cheaper or more expensive). Not an alert, just a log + persist.
+        if (result.miles != null && prev.miles != null && result.miles !== prev.miles) {
+          const delta = result.miles - prev.miles;
+          const sign = delta > 0 ? '+' : '';
+          console.log(`[Main] 💰 MILES CHANGED: ${route} ${date} ${result.flightNumber}: ${prev.miles.toLocaleString()} → ${result.miles.toLocaleString()} (${sign}${delta.toLocaleString()})`);
+        }
+        // Always refresh latest miles (handles backfill of legacy entries)
+        if (result.miles != null) prev.miles = result.miles;
       }
     }
   }
@@ -164,7 +176,8 @@ function processResults(allResults, state) {
     if (searchedRouteDateCabin.has(combo) && !seenKeys.has(key)) {
       if (flight.status === 'confirmed') {
         console.log(`[Main] ❌ GONE: ${flight.route} ${flight.date} ${flight.flightNumber} was confirmed, now unavailable`);
-        sendAlert(`❌ **Seats gone**: ${flight.flightNumber} ${flight.route} ${flight.date}\n${flight.cabinDesc || ''} — no longer available`);
+        const milesLine = flight.miles ? `\nWas: ${flight.miles.toLocaleString()} miles` : '';
+        sendAlert(`❌ **Seats gone**: ${flight.flightNumber} ${flight.route} ${flight.date}\n${flight.cabinDesc || ''} — no longer available${milesLine}`);
       }
       delete state.flights[key];
     }
@@ -180,7 +193,8 @@ async function main() {
   console.log('[Main] ANA Award Tracker starting...');
   console.log(`[Main] ${MAX_SESSIONS} parallel sessions | mixed cabin: ${SKIP_MIXED_CABIN ? 'skip' : 'include'} | max layover: ${MAX_LAYOVER_HOURS}h | waitlist: ${ALERT_WAITLIST ? 'alert' : 'skip'}`);
   for (const route of ROUTES) {
-    console.log(`[Main] Route: ${route.from}→${route.to} on ${route.dates.join(', ')}`);
+    const dateList = Object.keys(route.dates || {}).sort().join(', ');
+    console.log(`[Main] Route: ${route.from}→${route.to} on ${dateList}`);
   }
 
   const state = loadState();
@@ -227,26 +241,36 @@ async function main() {
       }
     }
 
-    // Build search jobs from refreshed routes, filtering out skip combos
+    // Build search jobs from refreshed routes, filtering out skip combos.
+    // Each (date, cabin) pair in a route's dates object becomes a task; we group
+    // tasks by cabin into a single job-per-cabin for runParallel's batching.
     const jobs = [];
     for (const route of activeRoutes) {
-      const cabins = getCabinsForRoute(route);
-      for (const cabin of cabins) {
-        const filteredDates = route.dates.filter(date => {
+      // Group: cabinName -> { code, name, dates: [] }
+      const datesByCabin = new Map();
+      for (const [date, cabinKeys] of Object.entries(route.dates || {})) {
+        for (const key of cabinKeys) {
+          const cabin = CABIN_BY_KEY[key];
+          if (!cabin) continue; // unknown cabin key — skip silently
           const combo = `${route.from}→${route.to}|${date}|${cabin.name}`;
           if (skipCombos.has(combo)) {
             skippedDueToConfirmed++;
-            return false;
+            continue;
           }
-          return true;
-        });
-        if (filteredDates.length > 0) {
+          if (!datesByCabin.has(cabin.name)) {
+            datesByCabin.set(cabin.name, { code: cabin.code, name: cabin.name, dates: [] });
+          }
+          datesByCabin.get(cabin.name).dates.push(date);
+        }
+      }
+      for (const { code, name, dates } of datesByCabin.values()) {
+        if (dates.length > 0) {
           jobs.push({
             from: route.from,
             to: route.to,
-            dates: filteredDates,
-            cabinCode: cabin.code,
-            cabinName: cabin.name,
+            dates: dates.slice().sort(),
+            cabinCode: code,
+            cabinName: name,
           });
         }
       }
@@ -329,7 +353,7 @@ async function main() {
     // Also opportunistically prune orphaned entries (routes/dates removed since last run).
     const validRouteDates = new Set();
     for (const route of activeRoutes) {
-      for (const date of route.dates) {
+      for (const date of Object.keys(route.dates || {})) {
         validRouteDates.add(`${route.from}→${route.to}|${date}`);
       }
     }

@@ -17,6 +17,96 @@ const fs = require('fs');
 const path = require('path');
 
 /**
+ * Parse a single addFormatedRecommendation() argument list into a raw
+ * string array, respecting single-quoted JS string literals and escape
+ * sequences. ANA embeds arguments like:
+ *
+ *   'USD<br />204.30',null,'204.30','<em class=\"price\">0<\/em>...',null,'57,000',null,...
+ *
+ * Plain comma-split breaks on the '57,000' value because it contains a
+ * literal comma inside a quoted string. This state machine walks the text
+ * character-by-character, tracking quote state, so args are split only on
+ * top-level commas.
+ *
+ * Returns an array of trimmed argument strings (quotes and nulls included).
+ */
+function parseCallArgs(text) {
+  const args = [];
+  let current = '';
+  let inQuote = false;
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === '\\' && i + 1 < text.length) {
+      // Escape sequence — consume both characters as-is
+      current += ch + text[i + 1];
+      i += 2;
+      continue;
+    }
+    if (ch === "'") {
+      inQuote = !inQuote;
+      current += ch;
+      i++;
+      continue;
+    }
+    if (ch === ',' && !inQuote) {
+      args.push(current.trim());
+      current = '';
+      i++;
+      continue;
+    }
+    current += ch;
+    i++;
+  }
+  if (current.trim()) args.push(current.trim());
+  return args;
+}
+
+/**
+ * Parse a single addFormatedRecommendation() 6th argument into a miles
+ * integer. ANA's arg format is a single-quoted number with optional comma
+ * thousands separators (e.g. `'57,000'` or `'150,000'`). A literal `null`
+ * or any non-numeric string returns null.
+ */
+function parseMilesArg(arg) {
+  if (!arg || arg === 'null') return null;
+  const m = arg.match(/^'(.*)'$/);
+  if (!m) return null;
+  if (!/^[\d,]+$/.test(m[1])) return null;
+  const n = parseInt(m[1].replace(/,/g, ''), 10);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/**
+ * Extract per-flight required-mileage values from ANA's flight results page.
+ *
+ * ANA's page renders the `<span class="label">Required mileage</span>` block
+ * only for the currently-selected flight, but the per-flight mileage is
+ * available for ALL flights in the inline JavaScript — one
+ * `addFormatedRecommendation(...)` call per flight, in the same order as the
+ * flight section order in the DOM.
+ *
+ * This helper takes the page's HTML source (e.g. `document.documentElement.outerHTML`)
+ * and returns an array of miles values, one per flight, in DOM order. Any
+ * flight whose call argument couldn't be parsed is null in that slot.
+ *
+ * Exported for unit testing. The same logic is inlined inside parseFlightDetails'
+ * page.evaluate callback because code in that callback runs in the browser
+ * context and cannot import module exports.
+ */
+function extractPerFlightMiles(html) {
+  if (typeof html !== 'string' || html.length === 0) return [];
+  const results = [];
+  const callRegex = /addFormatedRecommendation\(([\s\S]*?)\)/g;
+  let match;
+  while ((match = callRegex.exec(html)) !== null) {
+    const args = parseCallArgs(match[1]);
+    results.push(args.length >= 6 ? parseMilesArg(args[5]) : null);
+  }
+  return results;
+}
+
+/**
  * Extract flight availability from the search results page.
  * @param {Page} page - Puppeteer page
  * @param {string} cabinName - The cabin class being searched (for context)
@@ -250,7 +340,70 @@ async function parseResults(page, cabinName = 'Economy') {
 async function parseFlightDetails(page, cabinName = 'Business') {
   return page.evaluate((cabinNameArg) => {
     const bodyText = document.body?.innerText || '';
+    const html = document.documentElement?.outerHTML || '';
     const results = [];
+
+    // --- Per-flight miles extraction ---
+    // ANA only renders the "Required mileage" label for the currently-selected
+    // flight in the DOM, but embeds per-flight data in inline JavaScript calls:
+    //   addFormatedRecommendation('USD<br />204.30',null,'204.30','<em...>',null,'57,000',...)
+    // One call per flight, in the same DOM order as the flight sections.
+    // The 6th argument (index 5) is the miles value. We parse the call args
+    // with a state machine that respects single-quoted strings so the
+    // '57,000' literal (comma inside quotes) is treated as one argument.
+    //
+    // NOTE: The helpers below are duplicated from parser.js module scope
+    // (parseCallArgs, parseMilesArg, extractPerFlightMiles) because page.evaluate
+    // runs in the browser context and can't import module exports. Keep them
+    // in sync with the exported versions above. Unit tests exercise the
+    // exported copies, so any regex drift between the two will be caught.
+    const parseCallArgs = (text) => {
+      const args = [];
+      let current = '';
+      let inQuote = false;
+      let i = 0;
+      while (i < text.length) {
+        const ch = text[i];
+        if (ch === '\\' && i + 1 < text.length) {
+          current += ch + text[i + 1];
+          i += 2;
+          continue;
+        }
+        if (ch === "'") {
+          inQuote = !inQuote;
+          current += ch;
+          i++;
+          continue;
+        }
+        if (ch === ',' && !inQuote) {
+          args.push(current.trim());
+          current = '';
+          i++;
+          continue;
+        }
+        current += ch;
+        i++;
+      }
+      if (current.trim()) args.push(current.trim());
+      return args;
+    };
+    const parseMilesArg = (arg) => {
+      if (!arg || arg === 'null') return null;
+      const m = arg.match(/^'(.*)'$/);
+      if (!m) return null;
+      if (!/^[\d,]+$/.test(m[1])) return null;
+      const n = parseInt(m[1].replace(/,/g, ''), 10);
+      return Number.isFinite(n) && n > 0 ? n : null;
+    };
+
+    const perFlightMiles = [];
+    const callRegex = /addFormatedRecommendation\(([\s\S]*?)\)/g;
+    let cm;
+    while ((cm = callRegex.exec(html)) !== null) {
+      const args = parseCallArgs(cm[1]);
+      perFlightMiles.push(args.length >= 6 ? parseMilesArg(args[5]) : null);
+    }
+    let flightIndex = 0;
 
     // Split by "Flight" prefix
     const sections = bodyText.split(/(?=Flight[A-Z]{2}\d)/);
@@ -339,6 +492,14 @@ async function parseFlightDetails(page, cabinName = 'Business') {
       const durationMatch = section.match(/Total travel time (\d+h\d+min)/);
       const duration = durationMatch ? durationMatch[1] : '';
 
+      // Per-flight miles: the Nth flight section corresponds to the Nth
+      // addFormatedRecommendation() call parsed from the HTML above. If the
+      // mapping runs short (fewer JS calls than flight sections), the slot
+      // is null and the flight simply has no miles data — display code
+      // handles that gracefully.
+      const miles = perFlightMiles[flightIndex] ?? null;
+      flightIndex++;
+
       // Build descriptions
       let routeDesc = '';
       let cabinDesc = '';
@@ -371,6 +532,7 @@ async function parseFlightDetails(page, cabinName = 'Business') {
         isMixedCabin,
         routeDesc,
         cabinDesc,
+        miles,
         rawText: section.substring(0, 300),
         format: 'flight-detail',
       });
@@ -391,4 +553,10 @@ async function getPageDebugInfo(page) {
   }));
 }
 
-module.exports = { parseResults, parseFlightDetails, getPageDebugInfo };
+module.exports = {
+  parseResults, parseFlightDetails, getPageDebugInfo,
+  // Pure helpers exposed for unit testing (same logic is inlined inside
+  // parseFlightDetails' page.evaluate callback because browser context can't
+  // import module exports — tests catch drift between the two copies).
+  extractPerFlightMiles, parseCallArgs, parseMilesArg,
+};
