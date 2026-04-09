@@ -148,65 +148,88 @@ class Session {
       return false;
     }
 
-    // Check if we're on the login page
-    const hasLoginFields = await page.evaluate(() => {
-      return !!(document.querySelector('#accountNumber') && document.querySelector('#password'));
-    });
+    // ANA serves two login variants depending on session state:
+    //   FULL login   — page has #accountNumber AND #password (both must be filled)
+    //   RE-AUTH page — only #password is shown; AMC number is pre-filled and masked
+    //                  ("Logout TSANGYUNG WU AMC number ******3695 Password"), with
+    //                  the #amcMemberLogin submit button. Triggered after idle.
+    // We need to handle both. Detect by checking which input fields exist.
 
-    if (!hasLoginFields) {
+    const detectLoginForm = () => page.evaluate(() => ({
+      hasAccount: !!document.querySelector('#accountNumber'),
+      hasPassword: !!document.querySelector('#password'),
+    }));
+
+    let form = await detectLoginForm();
+
+    if (!form.hasPassword) {
       // Dismiss cookie consent overlay that may be hiding the fields
       await page.evaluate(() => {
         const btn = document.querySelector('#ensSave');
         if (btn) btn.click();
       });
       await randomDelay(2000, 3000);
+      form = await detectLoginForm();
 
-      // Check again after dismissing overlay
-      const hasFieldsNow = await page.evaluate(() => {
-        return !!(document.querySelector('#accountNumber') && document.querySelector('#password'));
-      });
-
-      if (!hasFieldsNow) {
-        // Navigate via 0771 to get a login page with proper session tokens
+      if (!form.hasPassword) {
+        // Navigate via 0771 to get a fresh login page with proper session tokens
         this.log('Navigating to login page via 0771...');
         await page.goto('https://www.ana.co.jp/other/int/meta/0771.html?CONNECTION_KIND=us&LANG=e', {
           waitUntil: 'networkidle2', timeout: 60000,
         });
         await randomDelay(3000, 5000);
-        // Dismiss cookie consent again
         await page.evaluate(() => {
           const btn = document.querySelector('#ensSave');
           if (btn) btn.click();
         });
         await randomDelay(1000, 2000);
+        form = await detectLoginForm();
       }
     }
 
-    // Enter credentials by typing (JS value assignment doesn't trigger ANA's form binding)
-    this.log('Entering credentials...');
-    const accountField = await page.$('#accountNumber');
-    const passField = await page.$('#password');
-    if (!accountField || !passField) {
-      this.log('Login fields not found on page');
+    if (!form.hasPassword) {
+      this.log('Password field not found on page — cannot login');
       return false;
     }
 
-    // Clear and type username
-    await accountField.click({ clickCount: 3 });
-    await accountField.type(username, { delay: 50 });
-    await randomDelay(500, 1000);
+    const passField = await page.$('#password');
 
-    // Clear and type password
-    await passField.click({ clickCount: 3 });
-    await passField.type(password, { delay: 50 });
-    await randomDelay(500, 1000);
+    if (form.hasAccount) {
+      // Full login: type both AMC number and password
+      this.log('Entering credentials (full login)...');
+      const accountField = await page.$('#accountNumber');
+      await accountField.click({ clickCount: 3 });
+      await accountField.type(username, { delay: 50 });
+      await randomDelay(500, 1000);
 
-    // Click login button
-    await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button, input[type="submit"]'));
-      const loginBtn = btns.find(b => /log.*in|sign.*in|ログイン/i.test(b.textContent || b.value || ''));
-      if (loginBtn) loginBtn.click();
-    });
+      await passField.click({ clickCount: 3 });
+      await passField.type(password, { delay: 50 });
+      await randomDelay(500, 1000);
+
+      // Click login button by text match (works for the full-login layout)
+      await page.evaluate(() => {
+        const btns = Array.from(document.querySelectorAll('button, input[type="submit"]'));
+        const loginBtn = btns.find(b => /log.*in|sign.*in|ログイン/i.test(b.textContent || b.value || ''));
+        if (loginBtn) loginBtn.click();
+      });
+    } else {
+      // Re-auth flow: AMC is pre-filled and masked, only password is needed.
+      // Use the specific #amcMemberLogin submit button instead of text matching,
+      // because the page also has a "Stay Logged On" button that could confuse
+      // the text-based search.
+      this.log('Entering credentials (re-auth: password only, AMC pre-filled)...');
+      await passField.click();
+      await passField.type(password, { delay: 80 });
+      await randomDelay(1000, 2000);
+
+      const loginBtn = await page.$('#amcMemberLogin');
+      if (loginBtn) {
+        await loginBtn.click();
+      } else {
+        this.log('amcMemberLogin button missing — submitting via Enter');
+        await passField.press('Enter');
+      }
+    }
 
     // Wait for redirect chain to complete
     this.log('Waiting for login redirect...');
