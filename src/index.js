@@ -10,7 +10,7 @@ const MAX_SESSIONS = parseInt(process.env.MAX_SESSIONS || '2');
 const SKIP_MIXED_CABIN = process.env.SKIP_MIXED_CABIN !== 'false'; // default: skip
 const MAX_LAYOVER_HOURS = parseInt(process.env.MAX_LAYOVER_HOURS || '30');
 const ALERT_WAITLIST = process.env.ALERT_WAITLIST !== 'false'; // default: alert waitlist too
-const SKIP_KNOWN_AVAILABLE = process.env.SKIP_KNOWN_AVAILABLE !== 'false'; // default: skip
+const SKIP_KNOWN_AVAILABLE = process.env.SKIP_KNOWN_AVAILABLE === 'true'; // default: OFF — always re-check so GONE detection works; set =true to reduce ANA load at cost of delayed GONE detection
 const RECHECK_HOURS = parseInt(process.env.RECHECK_HOURS || '4'); // re-check confirmed combos after this many hours
 
 if (!ANA_USERNAME || !ANA_PASSWORD) {
@@ -166,7 +166,7 @@ async function processOneResult({ route, cabin, date, results }, state) {
  * @param {Object} state — in-memory state (mutated: flights may be deleted)
  * @param {Set} seenKeys — flight keys seen during this run (accumulated via onResult)
  */
-function detectGoneFlights(allResults, state, seenKeys) {
+async function detectGoneFlights(allResults, state, seenKeys) {
   const searchedRouteDateCabin = new Set();
   for (const { route, cabin, date, results } of allResults) {
     if (results && results.length > 0 && !results[0]?._sessionFailed) {
@@ -181,7 +181,7 @@ function detectGoneFlights(allResults, state, seenKeys) {
       if (flight.status === 'confirmed') {
         console.log(`[Main] ❌ GONE: ${flight.route} ${flight.date} ${flight.flightNumber} was confirmed, now unavailable`);
         const milesLine = flight.miles ? `\nWas: ${flight.miles.toLocaleString()} miles` : '';
-        sendAlert(`❌ **Seats gone**: ${flight.flightNumber} ${flight.route} ${flight.date}\n${flight.cabinDesc || ''} — no longer available${milesLine}`);
+        await sendAlert(`❌ **Seats gone**: ${flight.flightNumber} ${flight.route} ${flight.date}\n${flight.cabinDesc || ''} — no longer available${milesLine}`);
       }
       delete state.flights[key];
     }
@@ -227,8 +227,15 @@ async function main() {
       return;
     }
 
-    // Build set of (route, date, cabin) combos that have CONFIRMED flights
-    // recently enough to skip re-checking. Waitlist does NOT count.
+    // Skip-known-confirmed: optionally skip re-searching combos that already
+    // have confirmed flights in state. DISABLED by default because it creates a
+    // blind spot where GONE detection can't fire — a confirmed flight that vanishes
+    // from ANA won't be detected until RECHECK_HOURS expires, leaving /status
+    // showing false positives. The dedup in processOneResult already prevents
+    // re-alerting for known flights, so re-searching confirmed combos only costs
+    // extra ANA requests, not extra alerts.
+    // Set SKIP_KNOWN_AVAILABLE=true in .env to re-enable if ANA rate limits are
+    // a problem (trades GONE detection latency for fewer requests per cycle).
     const skipCombos = new Set();
     let skippedDueToConfirmed = 0;
     if (SKIP_KNOWN_AVAILABLE && state.flights) {
@@ -236,9 +243,9 @@ async function main() {
       const now = Date.now();
       for (const flight of Object.values(state.flights)) {
         if (flight.status !== 'confirmed') continue;
-        if (!flight.searchedCabin) continue; // legacy entry without cabin info → don't skip
+        if (!flight.searchedCabin) continue;
         const lastSeen = new Date(flight.lastSeen).getTime();
-        if (now - lastSeen > recheckMs) continue; // stale → re-check to detect changes
+        if (now - lastSeen > recheckMs) continue;
         skipCombos.add(`${flight.route}|${flight.date}|${flight.searchedCabin}`);
       }
     }
@@ -360,7 +367,7 @@ async function main() {
     // GONE detection — deferred to post-batch because it needs to know
     // which combos were searched AND which flights were NOT found.
     const validResults = allResults.filter(r => !r._sessionFailed);
-    detectGoneFlights(validResults, state, allSeenKeys);
+    await detectGoneFlights(validResults, state, allSeenKeys);
 
     state.lastCheck = new Date().toISOString();
     saveState(state);

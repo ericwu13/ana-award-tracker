@@ -134,7 +134,7 @@ In `.env`:
 ```
 RECHECK_HOURS=4               # Re-check confirmed flights after this many hours
 MIN_BOOK_LEAD_DAYS=4          # Skip dates within ANA's 96-hour booking deadline
-SKIP_KNOWN_AVAILABLE=true     # Skip re-checking confirmed combos within RECHECK_HOURS
+SKIP_KNOWN_AVAILABLE=false    # Re-check confirmed combos every cycle (default). Set =true to reduce ANA load at cost of delayed GONE detection.
 SKIP_MIXED_CABIN=true         # Don't alert mixed-cabin layovers
 ALERT_WAITLIST=true           # Alert on waitlisted flights
 MAX_LAYOVER_HOURS=30          # Skip flights with longer layovers
