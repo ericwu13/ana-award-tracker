@@ -490,7 +490,7 @@ class Session {
  * @param {number} maxSessions - Max concurrent browser sessions
  * @returns {Array} All results: [{ route, cabin, date, results }]
  */
-async function runParallel(jobs, maxSessions = 4, lastChecked = {}) {
+async function runParallel(jobs, maxSessions = 4, lastChecked = {}, onResult = null) {
   const allResults = [];
   const sessions = [];
 
@@ -551,13 +551,23 @@ async function runParallel(jobs, maxSessions = 4, lastChecked = {}) {
       for (const task of chunk) {
         try {
           const { results } = await session.searchDate(task);
-          allResults.push({
+          const resultEntry = {
             route: `${task.from}→${task.to}`,
             cabin: task.cabinName,
             date: task.date,
             results,
-          });
+          };
+          allResults.push(resultEntry);
           consecutiveRateLimits = 0; // success — reset counter
+
+          // Fire per-result callback immediately so notifications go out
+          // within seconds of discovery, not after the full batch finishes.
+          // Await ensures the Discord message is sent before moving on.
+          // Error is caught so a notification failure never kills a search.
+          if (onResult) {
+            try { await onResult(resultEntry); }
+            catch (e) { session.log(`onResult callback error: ${e.message}`); }
+          }
         } catch (err) {
           session.log(`Error searching ${task.date}: ${err.message}`);
 

@@ -68,101 +68,105 @@ function durationToHours(duration) {
 }
 
 /**
- * Process results: smart deduplication, status change detection, filtering.
+ * Process a single search result entry: filter, dedup against state.flights,
+ * and send Discord notifications for NEW or UPGRADED flights IMMEDIATELY.
+ *
+ * Called via the `onResult` callback from inside runParallel's worker loop,
+ * so each notification fires within seconds of the bot finding the flight —
+ * not after the full 5-15 minute batch completes. This matters for volatile
+ * partner award seats (EVA, United) that can appear and vanish in minutes.
+ *
+ * Returns { alertsSent, seenKeys } so the caller can accumulate totals for
+ * the end-of-batch summary and GONE detection.
  */
-function processResults(allResults, state) {
+async function processOneResult({ route, cabin, date, results }, state) {
+  const seenKeys = [];
   let alertsSent = 0;
-  const seenKeys = new Set(); // Track keys seen this run (to detect GONE flights)
 
   if (!state.flights) state.flights = {};
+  if (!results || results.length === 0 || results[0]?.noResults) {
+    return { alertsSent, seenKeys };
+  }
 
-  for (const { route, cabin, date, results } of allResults) {
-    if (!results || results.length === 0 || results[0]?.noResults) {
+  for (const result of results) {
+    if (!result.available && !result.waitlist) continue;
+
+    // --- FILTERS ---
+    if (SKIP_MIXED_CABIN && result.isMixedCabin) {
+      console.log(`[Main] Skipped mixed cabin: ${route} ${date} ${result.flightNumber} (${result.cabinDesc})`);
       continue;
     }
+    const hours = durationToHours(result.duration);
+    if (hours > MAX_LAYOVER_HOURS && result.layover) {
+      console.log(`[Main] Skipped long layover: ${route} ${date} ${result.flightNumber} (${result.duration})`);
+      continue;
+    }
+    if (!ALERT_WAITLIST && result.waitlist) continue;
 
-    for (const result of results) {
-      if (!result.available && !result.waitlist) continue;
+    // --- DEDUPLICATION & STATUS TRACKING ---
+    const key = flightKey(route, date, result);
+    seenKeys.push(key);
+    const currentStatus = result.waitlist ? 'waitlist' : 'confirmed';
+    const prev = state.flights[key];
 
-      // --- FILTERS ---
-      // Skip mixed cabin unless configured otherwise
-      if (SKIP_MIXED_CABIN && result.isMixedCabin) {
-        console.log(`[Main] Skipped mixed cabin: ${route} ${date} ${result.flightNumber} (${result.cabinDesc})`);
-        continue;
+    if (!prev) {
+      // NEW flight — alert immediately!
+      console.log(`[Main] 🎉 NEW ${currentStatus}: ${route} ${date} ${result.flightNumber || result.cabin} ${result.routeDesc || ''}${result.miles ? ` (${result.miles.toLocaleString()} miles)` : ''}`);
+      const sent = await notifyAvailability(date, result, route);
+      if (sent) alertsSent++;
+      state.flights[key] = {
+        firstSeen: new Date().toISOString(),
+        lastSeen: new Date().toISOString(),
+        status: currentStatus,
+        route,
+        date,
+        searchedCabin: cabin,
+        flightNumber: result.flightNumber,
+        routeDesc: result.routeDesc,
+        cabinDesc: result.cabinDesc,
+        duration: result.duration,
+        miles: result.miles ?? null,
+      };
+    } else if (prev.status === 'waitlist' && currentStatus === 'confirmed') {
+      // UPGRADE — alert immediately!
+      console.log(`[Main] 🎉 UPGRADE: ${route} ${date} ${result.flightNumber} waitlist → confirmed!`);
+      const sent = await notifyAvailability(date, { ...result, _statusChange: 'UPGRADED from waitlist' }, route);
+      if (sent) alertsSent++;
+      prev.status = 'confirmed';
+      prev.lastSeen = new Date().toISOString();
+      if (result.miles != null) prev.miles = result.miles;
+    } else if (prev.status === 'confirmed' && currentStatus === 'waitlist') {
+      // DOWNGRADE — log only, don't alert (too noisy)
+      console.log(`[Main] ⚠️ DOWNGRADE: ${route} ${date} ${result.flightNumber} confirmed → waitlist`);
+      prev.status = 'waitlist';
+      prev.lastSeen = new Date().toISOString();
+      if (result.miles != null) prev.miles = result.miles;
+    } else {
+      // STILL AVAILABLE — update lastSeen, detect miles changes
+      prev.lastSeen = new Date().toISOString();
+      if (result.miles != null && prev.miles != null && result.miles !== prev.miles) {
+        const delta = result.miles - prev.miles;
+        const sign = delta > 0 ? '+' : '';
+        console.log(`[Main] 💰 MILES CHANGED: ${route} ${date} ${result.flightNumber}: ${prev.miles.toLocaleString()} → ${result.miles.toLocaleString()} (${sign}${delta.toLocaleString()})`);
       }
-
-      // Skip very long layovers
-      const hours = durationToHours(result.duration);
-      if (hours > MAX_LAYOVER_HOURS && result.layover) {
-        console.log(`[Main] Skipped long layover: ${route} ${date} ${result.flightNumber} (${result.duration})`);
-        continue;
-      }
-
-      // Skip waitlist if configured
-      if (!ALERT_WAITLIST && result.waitlist) {
-        continue;
-      }
-
-      // --- DEDUPLICATION & STATUS TRACKING ---
-      const key = flightKey(route, date, result);
-      seenKeys.add(key);
-      const currentStatus = result.waitlist ? 'waitlist' : 'confirmed';
-      const prev = state.flights[key];
-
-      if (!prev) {
-        // NEW flight — alert!
-        console.log(`[Main] 🎉 NEW ${currentStatus}: ${route} ${date} ${result.flightNumber || result.cabin} ${result.routeDesc || ''}${result.miles ? ` (${result.miles.toLocaleString()} miles)` : ''}`);
-        const sent = notifyAvailability(date, result, route);
-        if (sent) alertsSent++;
-        state.flights[key] = {
-          firstSeen: new Date().toISOString(),
-          lastSeen: new Date().toISOString(),
-          status: currentStatus,
-          route,
-          date,
-          searchedCabin: cabin, // Economy or Business — for skip-known-available logic
-          flightNumber: result.flightNumber,
-          routeDesc: result.routeDesc,
-          cabinDesc: result.cabinDesc,
-          duration: result.duration,
-          miles: result.miles ?? null,
-        };
-      } else if (prev.status === 'waitlist' && currentStatus === 'confirmed') {
-        // UPGRADE — was waitlisted, now confirmed! Alert!
-        console.log(`[Main] 🎉 UPGRADE: ${route} ${date} ${result.flightNumber} waitlist → confirmed!`);
-        const sent = notifyAvailability(date, { ...result, _statusChange: 'UPGRADED from waitlist' }, route);
-        if (sent) alertsSent++;
-        prev.status = 'confirmed';
-        prev.lastSeen = new Date().toISOString();
-        if (result.miles != null) prev.miles = result.miles;
-      } else if (prev.status === 'confirmed' && currentStatus === 'waitlist') {
-        // DOWNGRADE — was confirmed, now waitlist only
-        console.log(`[Main] ⚠️ DOWNGRADE: ${route} ${date} ${result.flightNumber} confirmed → waitlist`);
-        prev.status = 'waitlist';
-        prev.lastSeen = new Date().toISOString();
-        if (result.miles != null) prev.miles = result.miles;
-        // Don't alert downgrades — too noisy
-      } else {
-        // STILL AVAILABLE — same status, don't alert
-        prev.lastSeen = new Date().toISOString();
-
-        // Detect and log miles price changes (useful signal — ANA can adjust
-        // award pricing, and the user may want to know if a tracked flight
-        // got cheaper or more expensive). Not an alert, just a log + persist.
-        if (result.miles != null && prev.miles != null && result.miles !== prev.miles) {
-          const delta = result.miles - prev.miles;
-          const sign = delta > 0 ? '+' : '';
-          console.log(`[Main] 💰 MILES CHANGED: ${route} ${date} ${result.flightNumber}: ${prev.miles.toLocaleString()} → ${result.miles.toLocaleString()} (${sign}${delta.toLocaleString()})`);
-        }
-        // Always refresh latest miles (handles backfill of legacy entries)
-        if (result.miles != null) prev.miles = result.miles;
-      }
+      if (result.miles != null) prev.miles = result.miles;
     }
   }
 
-  // GONE detection: when we re-check a (route, date, cabin) combo and a
-  // previously-confirmed flight is no longer in the results, alert the user
-  // and remove it from state.
+  return { alertsSent, seenKeys };
+}
+
+/**
+ * GONE detection — runs AFTER all searches complete (cannot be streamed).
+ *
+ * When a (route, date, cabin) combo was searched AND a previously-confirmed
+ * flight is no longer in the results, alert the user and remove from state.
+ *
+ * @param {Array} allResults — full results array from runParallel
+ * @param {Object} state — in-memory state (mutated: flights may be deleted)
+ * @param {Set} seenKeys — flight keys seen during this run (accumulated via onResult)
+ */
+function detectGoneFlights(allResults, state, seenKeys) {
   const searchedRouteDateCabin = new Set();
   for (const { route, cabin, date, results } of allResults) {
     if (results && results.length > 0 && !results[0]?._sessionFailed) {
@@ -171,7 +175,7 @@ function processResults(allResults, state) {
   }
 
   for (const [key, flight] of Object.entries(state.flights)) {
-    if (!flight.searchedCabin) continue; // legacy entry without cabin info → leave alone
+    if (!flight.searchedCabin) continue;
     const combo = `${flight.route}|${flight.date}|${flight.searchedCabin}`;
     if (searchedRouteDateCabin.has(combo) && !seenKeys.has(key)) {
       if (flight.status === 'confirmed') {
@@ -182,8 +186,6 @@ function processResults(allResults, state) {
       delete state.flights[key];
     }
   }
-
-  return alertsSent;
 }
 
 async function main() {
@@ -293,10 +295,22 @@ async function main() {
     }
     const totalExpected = expectedTasks.size;
 
-    // Run all searches in parallel
+    // Run all searches in parallel. The onResult callback fires for each
+    // successful search so Discord notifications go out IMMEDIATELY — within
+    // seconds of discovery, not after the full 5-15 minute batch completes.
     const startTime = Date.now();
     if (!state.lastChecked) state.lastChecked = {};
-    const allResults = await runParallel(jobs, MAX_SESSIONS, state.lastChecked);
+
+    let alertsSent = 0;
+    const allSeenKeys = new Set();
+
+    const onResult = async (entry) => {
+      const { alertsSent: a, seenKeys } = await processOneResult(entry, state);
+      alertsSent += a;
+      for (const k of seenKeys) allSeenKeys.add(k);
+    };
+
+    const allResults = await runParallel(jobs, MAX_SESSIONS, state.lastChecked, onResult);
     const elapsed = Math.round((Date.now() - startTime) / 1000);
 
     // Mark each task that was actually attempted
@@ -343,8 +357,11 @@ async function main() {
       skippedSample: skippedTasks.slice(0, 20),
     };
 
+    // GONE detection — deferred to post-batch because it needs to know
+    // which combos were searched AND which flights were NOT found.
     const validResults = allResults.filter(r => !r._sessionFailed);
-    const alertsSent = processResults(validResults, state);
+    detectGoneFlights(validResults, state, allSeenKeys);
+
     state.lastCheck = new Date().toISOString();
     saveState(state);
 
