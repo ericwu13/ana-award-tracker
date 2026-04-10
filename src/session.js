@@ -357,6 +357,7 @@ class Session {
     // Fill departure
     const [year, month, day] = date.split('-');
     const depTextSel = '#departureAirportCode\\:field_pctext';
+    const depHiddenSel = '#departureAirportCode\\:field';
     await page.click(depTextSel).catch(() => {});
     await randomDelay(300, 500);
     await page.evaluate((sel) => { document.querySelector(sel).value = ''; }, depTextSel);
@@ -367,8 +368,22 @@ class Session {
     await page.keyboard.press('Enter');
     await randomDelay(1500, 2000);
 
+    // Force-set the hidden departure field as a safety net. The autocomplete
+    // flow above (ArrowDown + Enter) USUALLY updates the hidden field, but
+    // intermittently fails when the dropdown is slow or doesn't trigger —
+    // causing the previous search's value to persist and the wrong route
+    // to be searched.
+    await page.evaluate((sel, code) => {
+      const hidden = document.querySelector(sel);
+      if (hidden && hidden.value !== code) {
+        hidden.value = code;
+        hidden.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    }, depHiddenSel, from);
+
     // Fill arrival
     const arrTextSel = '#arrivalAirportCode\\:field_pctext';
+    const arrHiddenSel = '#arrivalAirportCode\\:field';
     await page.click(arrTextSel).catch(() => {});
     await randomDelay(300, 500);
     await page.evaluate((sel) => { document.querySelector(sel).value = ''; }, arrTextSel);
@@ -378,6 +393,31 @@ class Session {
     await randomDelay(300, 500);
     await page.keyboard.press('Enter');
     await randomDelay(1500, 2000);
+
+    // Force-set the hidden arrival field (same safety net as departure)
+    await page.evaluate((sel, code) => {
+      const hidden = document.querySelector(sel);
+      if (hidden && hidden.value !== code) {
+        hidden.value = code;
+        hidden.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    }, arrHiddenSel, to);
+
+    // Verify both hidden fields match intended route before submitting
+    const formCheck = await page.evaluate((depSel, arrSel) => {
+      const dep = document.querySelector(depSel);
+      const arr = document.querySelector(arrSel);
+      return { dep: dep?.value, arr: arr?.value };
+    }, depHiddenSel, arrHiddenSel);
+    if (formCheck.dep !== from || formCheck.arr !== to) {
+      this.log(`⚠️ Form field mismatch! Expected ${from}→${to}, got ${formCheck.dep}→${formCheck.arr}. Forcing...`);
+      await page.evaluate((depSel, arrSel, fromCode, toCode) => {
+        const dep = document.querySelector(depSel);
+        const arr = document.querySelector(arrSel);
+        if (dep) { dep.value = fromCode; dep.dispatchEvent(new Event('change', { bubbles: true })); }
+        if (arr) { arr.value = toCode; arr.dispatchEvent(new Event('change', { bubbles: true })); }
+      }, depHiddenSel, arrHiddenSel, from, to);
+    }
 
     // Set date — directly set hidden field (calendar is unreliable)
     const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
