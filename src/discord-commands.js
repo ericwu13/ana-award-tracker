@@ -2,7 +2,7 @@
  * Discord slash command registration and handling.
  */
 const { REST, Routes, SlashCommandBuilder } = require('discord.js');
-const { addRoute, removeRoute, syncState, parseDateInput, formatStatus, formatRoutes, formatFlights, loadRoutes, saveRoutes } = require('./routes');
+const { addRoute, removeRoute, syncState, parseDateInput, expandDateRange, formatStatus, formatRoutes, formatFlights, loadRoutes, saveRoutes } = require('./routes');
 
 /**
  * Define slash commands.
@@ -13,7 +13,8 @@ const commands = [
     .setDescription('Add a route and date to track for award availability')
     .addStringOption(opt => opt.setName('from').setDescription('Departure airport code (e.g., TPE, SFO, NRT)').setRequired(true))
     .addStringOption(opt => opt.setName('to').setDescription('Arrival airport code (e.g., SFO, TPE, LAX)').setRequired(true))
-    .addStringOption(opt => opt.setName('date').setDescription('YYYY-MM-DD, YYYY-MM (month), or YYYY-MM-DD~YYYY-MM-DD (range)').setRequired(true))
+    .addStringOption(opt => opt.setName('date').setDescription('Start date (YYYY-MM-DD) or month (YYYY-MM)').setRequired(true))
+    .addStringOption(opt => opt.setName('until').setDescription('End date for range (YYYY-MM-DD) — adds every day from date to until').setRequired(false))
     .addStringOption(opt => opt.setName('cabin').setDescription('Cabin class to track (default: Premium Eco + Business)').setRequired(false).addChoices(
       { name: 'Premium Eco + Business (default)', value: 'both' },
       { name: 'All three (PE + Economy + Business)', value: 'all' },
@@ -27,7 +28,8 @@ const commands = [
     .setDescription('Remove a route, date, or just a specific cabin from a date')
     .addStringOption(opt => opt.setName('from').setDescription('Departure airport code (e.g., TPE)').setRequired(true))
     .addStringOption(opt => opt.setName('to').setDescription('Arrival airport code (e.g., SFO)').setRequired(true))
-    .addStringOption(opt => opt.setName('date').setDescription('YYYY-MM-DD, YYYY-MM, or YYYY-MM-DD~YYYY-MM-DD (omit to remove entire route)').setRequired(false))
+    .addStringOption(opt => opt.setName('date').setDescription('YYYY-MM-DD or YYYY-MM (omit to remove entire route)').setRequired(false))
+    .addStringOption(opt => opt.setName('until').setDescription('End date for range (YYYY-MM-DD) — removes every day from date to until').setRequired(false))
     .addStringOption(opt => opt.setName('cabin').setDescription('Optional: remove only this cabin from the date(s)').setRequired(false).addChoices(
       { name: 'Premium Economy', value: 'premium-economy' },
       { name: 'Economy', value: 'economy' },
@@ -110,13 +112,24 @@ async function handleCommand(interaction, triggerCheck) {
     const from = interaction.options.getString('from').toUpperCase();
     const to = interaction.options.getString('to').toUpperCase();
     const dateInput = interaction.options.getString('date');
+    const untilInput = interaction.options.getString('until');
 
     const cabin = interaction.options.getString('cabin') || 'both';
 
-    const dates = parseDateInput(dateInput);
-    if (!dates) {
-      await interaction.reply(`❌ Invalid date format: \`${dateInput}\`\nUse \`YYYY-MM-DD\` for a specific date (e.g., \`2026-10-15\`) or \`YYYY-MM\` for a whole month (e.g., \`2026-10\`).`);
-      return;
+    let dates;
+    if (untilInput) {
+      // Range mode: date → until (daily)
+      dates = expandDateRange(dateInput.trim(), untilInput.trim());
+      if (!dates) {
+        await interaction.reply(`❌ Invalid date range: \`${dateInput}\` to \`${untilInput}\``);
+        return;
+      }
+    } else {
+      dates = parseDateInput(dateInput);
+      if (!dates) {
+        await interaction.reply(`❌ Invalid date format: \`${dateInput}\`\nUse \`YYYY-MM-DD\` for a date, \`YYYY-MM\` for a month, or add \`until:\` for a range.`);
+        return;
+      }
     }
 
     const { newlyAddedDates, updatedDates, totalDates } = addRoute(from, to, dates, cabin);
@@ -151,10 +164,18 @@ async function handleCommand(interaction, triggerCheck) {
     const from = interaction.options.getString('from').toUpperCase();
     const to = interaction.options.getString('to').toUpperCase();
     const dateInput = interaction.options.getString('date');
+    const untilInput = interaction.options.getString('until');
     const cabin = interaction.options.getString('cabin'); // optional
 
     let dates = null;
-    if (dateInput) {
+    if (untilInput && dateInput) {
+      // Range mode: date → until (daily)
+      dates = expandDateRange(dateInput.trim(), untilInput.trim());
+      if (!dates) {
+        await interaction.reply(`❌ Invalid date range: \`${dateInput}\` to \`${untilInput}\``);
+        return;
+      }
+    } else if (dateInput) {
       const trimmed = dateInput.trim();
       if (/^\d{4}-\d{2}$/.test(trimmed)) {
         // Month input (YYYY-MM): find ALL dates in this route that fall in that
