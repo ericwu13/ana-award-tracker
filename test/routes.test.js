@@ -10,6 +10,8 @@
  */
 const assert = require('assert');
 const {
+  parseDateInput,
+  expandDateRange,
   expandCabinKeyword,
   sortCabinKeys,
   migrateRoute,
@@ -44,6 +46,72 @@ function test(name, fn) {
     failures.push({ name, error: e });
   }
 }
+
+// ===========================================================================
+// ===========================================================================
+section('parseDateInput + expandDateRange');
+// ===========================================================================
+
+test('single date: "2026-07-10"', () => {
+  assert.deepStrictEqual(parseDateInput('2026-07-10'), ['2026-07-10']);
+});
+
+test('month: "2026-07" → weekly expansion', () => {
+  const dates = parseDateInput('2026-07');
+  assert.strictEqual(dates[0], '2026-07-01');
+  assert.ok(dates.length >= 4 && dates.length <= 5);
+});
+
+test('range with tilde: "2026-07-10~2026-07-13" → 4 daily dates', () => {
+  assert.deepStrictEqual(
+    parseDateInput('2026-07-10~2026-07-13'),
+    ['2026-07-10', '2026-07-11', '2026-07-12', '2026-07-13']
+  );
+});
+
+test('range with "to": "2026-07-10 to 2026-07-13" → 4 daily dates', () => {
+  assert.deepStrictEqual(
+    parseDateInput('2026-07-10 to 2026-07-13'),
+    ['2026-07-10', '2026-07-11', '2026-07-12', '2026-07-13']
+  );
+});
+
+test('range: same start and end → single date', () => {
+  assert.deepStrictEqual(parseDateInput('2026-07-10~2026-07-10'), ['2026-07-10']);
+});
+
+test('range: end before start → swapped silently', () => {
+  assert.deepStrictEqual(
+    parseDateInput('2026-07-13~2026-07-10'),
+    ['2026-07-10', '2026-07-11', '2026-07-12', '2026-07-13']
+  );
+});
+
+test('range: cross-month boundary', () => {
+  assert.deepStrictEqual(
+    parseDateInput('2026-07-30~2026-08-02'),
+    ['2026-07-30', '2026-07-31', '2026-08-01', '2026-08-02']
+  );
+});
+
+test('range: "to" case-insensitive', () => {
+  assert.deepStrictEqual(
+    parseDateInput('2026-07-10 TO 2026-07-12'),
+    ['2026-07-10', '2026-07-11', '2026-07-12']
+  );
+});
+
+test('invalid input → null', () => {
+  assert.strictEqual(parseDateInput('not-a-date'), null);
+  assert.strictEqual(parseDateInput(''), null);
+});
+
+test('expandDateRange directly: 3 days', () => {
+  assert.deepStrictEqual(
+    expandDateRange('2026-12-29', '2026-12-31'),
+    ['2026-12-29', '2026-12-30', '2026-12-31']
+  );
+});
 
 // ===========================================================================
 section('expandCabinKeyword');

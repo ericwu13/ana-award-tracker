@@ -45,18 +45,54 @@ function expandMonth(yearMonth) {
 }
 
 /**
+ * Expand a date range into daily dates.
+ * "2026-07-10", "2026-07-13" → ["2026-07-10", "2026-07-11", "2026-07-12", "2026-07-13"]
+ * If end < start, they're swapped silently so the user doesn't get an error.
+ */
+function expandDateRange(startStr, endStr) {
+  let start = new Date(startStr + 'T00:00:00');
+  let end = new Date(endStr + 'T00:00:00');
+  if (isNaN(start) || isNaN(end)) return null;
+  if (end < start) [start, end] = [end, start];
+
+  const dates = [];
+  const current = new Date(start);
+  while (current <= end) {
+    const y = current.getFullYear();
+    const m = String(current.getMonth() + 1).padStart(2, '0');
+    const d = String(current.getDate()).padStart(2, '0');
+    dates.push(`${y}-${m}-${d}`);
+    current.setDate(current.getDate() + 1);
+  }
+  return dates.length > 0 ? dates : null;
+}
+
+/**
  * Parse a date input string. Accepts:
- *   "2026-10-15"  → ["2026-10-15"]
- *   "2026-10"     → ["2026-10-04", "2026-10-11", "2026-10-18", "2026-10-25"]
+ *   "2026-10-15"                       → ["2026-10-15"]
+ *   "2026-10"                          → ["2026-10-01", "2026-10-08", ...] (weekly)
+ *   "2026-07-10~2026-07-13"            → ["2026-07-10", ..., "2026-07-13"] (daily range)
+ *   "2026-07-10 to 2026-07-13"         → same (natural language range)
  */
 function parseDateInput(input) {
   const trimmed = input.trim();
+
+  // Range: "2026-07-10~2026-07-13" or "2026-07-10 to 2026-07-13"
+  const rangeMatch = trimmed.match(/^(\d{4}-\d{2}-\d{2})\s*(?:~|to)\s*(\d{4}-\d{2}-\d{2})$/i);
+  if (rangeMatch) {
+    return expandDateRange(rangeMatch[1], rangeMatch[2]);
+  }
+
+  // Month: "2026-10"
   if (/^\d{4}-\d{2}$/.test(trimmed)) {
     return expandMonth(trimmed);
   }
+
+  // Single date: "2026-10-15"
   if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
     return [trimmed];
   }
+
   return null; // invalid
 }
 
@@ -735,7 +771,7 @@ module.exports = {
   // Filesystem-aware public API
   loadRoutes, saveRoutes, seedRoutesIfNeeded,
   addRoute, removeRoute, syncState,
-  parseDateInput, expandMonth, shortDate,
+  parseDateInput, expandMonth, expandDateRange, shortDate,
   getStatusSummary, formatStatus, formatRoutes, formatFlights,
   cleanupExpiredDates, todayPST, minBookableDate,
   // Pure helpers (exposed for unit testing and for index.js)

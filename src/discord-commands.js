@@ -13,7 +13,7 @@ const commands = [
     .setDescription('Add a route and date to track for award availability')
     .addStringOption(opt => opt.setName('from').setDescription('Departure airport code (e.g., TPE, SFO, NRT)').setRequired(true))
     .addStringOption(opt => opt.setName('to').setDescription('Arrival airport code (e.g., SFO, TPE, LAX)').setRequired(true))
-    .addStringOption(opt => opt.setName('date').setDescription('YYYY-MM-DD for a date, YYYY-MM for whole month (e.g., 2026-10-15 or 2026-10)').setRequired(true))
+    .addStringOption(opt => opt.setName('date').setDescription('YYYY-MM-DD, YYYY-MM (month), or YYYY-MM-DD~YYYY-MM-DD (range)').setRequired(true))
     .addStringOption(opt => opt.setName('cabin').setDescription('Cabin class to track (default: Premium Eco + Business)').setRequired(false).addChoices(
       { name: 'Premium Eco + Business (default)', value: 'both' },
       { name: 'All three (PE + Economy + Business)', value: 'all' },
@@ -27,7 +27,7 @@ const commands = [
     .setDescription('Remove a route, date, or just a specific cabin from a date')
     .addStringOption(opt => opt.setName('from').setDescription('Departure airport code (e.g., TPE)').setRequired(true))
     .addStringOption(opt => opt.setName('to').setDescription('Arrival airport code (e.g., SFO)').setRequired(true))
-    .addStringOption(opt => opt.setName('date').setDescription('YYYY-MM-DD or YYYY-MM to remove (omit to remove entire route)').setRequired(false))
+    .addStringOption(opt => opt.setName('date').setDescription('YYYY-MM-DD, YYYY-MM, or YYYY-MM-DD~YYYY-MM-DD (omit to remove entire route)').setRequired(false))
     .addStringOption(opt => opt.setName('cabin').setDescription('Optional: remove only this cabin from the date(s)').setRequired(false).addChoices(
       { name: 'Premium Economy', value: 'premium-economy' },
       { name: 'Economy', value: 'economy' },
