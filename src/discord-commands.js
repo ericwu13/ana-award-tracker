@@ -187,23 +187,39 @@ async function handleCommand(interaction, triggerCheck) {
       return;
     }
 
-    // Clean cached flight data for dates that were fully removed (not for
-    // cabin-only removals, since the date is still tracked in other cabins).
+    // Clean cached flight data + lastChecked entries for removed dates.
+    // For month-based untrack (YYYY-MM), use prefix matching on state keys
+    // instead of relying solely on result.removedDates — this catches orphaned
+    // entries from prior buggy /untrack calls that removed routes but failed
+    // to clean state (e.g., parseDateInput expansion mismatch).
     const fs = require('fs');
     const path = require('path');
     const stateFile = path.join(__dirname, '..', 'data', 'state.json');
     let cleaned = 0;
+    const isMonthInput = dateInput && /^\d{4}-\d{2}$/.test(dateInput.trim());
     try {
       const state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
       const routeLabel = `${from}→${to}`;
-      const datesToClean = result.removedEntireRoute
-        ? null  // wipe all route keys
-        : result.removedDates;
+
+      const shouldCleanKey = (key) => {
+        if (!key.startsWith(`${routeLabel}|`)) return false;
+        if (result.removedEntireRoute) return true;
+        // Month-based full removal (no cabin filter): clean by month prefix
+        // to catch orphaned daily entries that aren't in result.removedDates
+        if (!cabin && isMonthInput) {
+          const [, flightDate] = key.split('|');
+          return flightDate && flightDate.startsWith(dateInput.trim());
+        }
+        // Specific dates: clean only those actually removed from routes
+        return result.removedDates.some(d => key.startsWith(`${routeLabel}|${d}|`));
+      };
+
       for (const key of Object.keys(state.flights || {})) {
-        const shouldDelete = datesToClean === null
-          ? key.startsWith(`${routeLabel}|`)
-          : datesToClean.some(d => key.startsWith(`${routeLabel}|${d}|`));
-        if (shouldDelete) { delete state.flights[key]; cleaned++; }
+        if (shouldCleanKey(key)) { delete state.flights[key]; cleaned++; }
+      }
+      // Also clean lastChecked for consistency
+      for (const key of Object.keys(state.lastChecked || {})) {
+        if (shouldCleanKey(key)) { delete state.lastChecked[key]; }
       }
       if (cleaned > 0) fs.writeFileSync(stateFile, JSON.stringify(state, null, 2));
     } catch {
