@@ -151,7 +151,26 @@ async function handleCommand(interaction, triggerCheck) {
 
     let dates = null;
     if (dateInput) {
-      dates = parseDateInput(dateInput);
+      const trimmed = dateInput.trim();
+      if (/^\d{4}-\d{2}$/.test(trimmed)) {
+        // Month input (YYYY-MM): find ALL dates in this route that fall in that
+        // month, not just the parseDateInput weekly expansion. This handles the
+        // case where dates were added individually (12-02, 12-03, etc.) but the
+        // user untracks by month — they expect ALL December dates removed.
+        const currentRoutes = loadRoutes();
+        const route = currentRoutes.find(r => r.from === from && r.to === to);
+        if (route && route.dates) {
+          const monthDates = Object.keys(route.dates).filter(d => d.startsWith(trimmed));
+          // Also include the parseDateInput expansion so dates not yet in the
+          // route (edge case) are covered
+          const expanded = parseDateInput(dateInput) || [];
+          dates = [...new Set([...monthDates, ...expanded])];
+        } else {
+          dates = parseDateInput(dateInput);
+        }
+      } else {
+        dates = parseDateInput(dateInput);
+      }
       if (!dates) {
         await interaction.reply(`❌ Invalid date format: \`${dateInput}\``);
         return;
