@@ -671,10 +671,70 @@ function cleanupExpiredDates() {
   return { removedDates, removedFlights };
 }
 
+/**
+ * Sync state.flights with current routes.json — remove any flight entries
+ * whose (route, date) is no longer tracked. This is the same pruning that
+ * runs at the end of each search cycle (index.js), exposed here so it can
+ * be triggered on-demand via the /sync Discord command.
+ *
+ * Returns { prunedFlights, prunedLastChecked, remainingFlights }.
+ */
+function syncState() {
+  const routes = loadRoutes();
+  let state;
+  try {
+    state = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+  } catch {
+    return { prunedFlights: 0, prunedLastChecked: 0, remainingFlights: 0 };
+  }
+
+  // Build the set of valid (route, date) combos from current routes.json
+  const validRouteDates = new Set();
+  for (const route of routes) {
+    for (const date of Object.keys(route.dates || {})) {
+      validRouteDates.add(`${route.from}→${route.to}|${date}`);
+    }
+  }
+
+  // Prune flights
+  let prunedFlights = 0;
+  if (state.flights) {
+    for (const key of Object.keys(state.flights)) {
+      const [route, date] = key.split('|');
+      if (!validRouteDates.has(`${route}|${date}`)) {
+        delete state.flights[key];
+        prunedFlights++;
+      }
+    }
+  }
+
+  // Prune lastChecked entries for combos that no longer exist
+  let prunedLastChecked = 0;
+  if (state.lastChecked) {
+    for (const key of Object.keys(state.lastChecked)) {
+      const [route, date] = key.split('|');
+      if (!validRouteDates.has(`${route}|${date}`)) {
+        delete state.lastChecked[key];
+        prunedLastChecked++;
+      }
+    }
+  }
+
+  if (prunedFlights > 0 || prunedLastChecked > 0) {
+    fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+  }
+
+  return {
+    prunedFlights,
+    prunedLastChecked,
+    remainingFlights: Object.keys(state.flights || {}).length,
+  };
+}
+
 module.exports = {
   // Filesystem-aware public API
   loadRoutes, saveRoutes, seedRoutesIfNeeded,
-  addRoute, removeRoute,
+  addRoute, removeRoute, syncState,
   parseDateInput, expandMonth, shortDate,
   getStatusSummary, formatStatus, formatRoutes, formatFlights,
   cleanupExpiredDates, todayPST, minBookableDate,

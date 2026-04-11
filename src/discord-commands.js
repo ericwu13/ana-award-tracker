@@ -2,7 +2,7 @@
  * Discord slash command registration and handling.
  */
 const { REST, Routes, SlashCommandBuilder } = require('discord.js');
-const { addRoute, removeRoute, parseDateInput, formatStatus, formatRoutes, formatFlights, loadRoutes, saveRoutes } = require('./routes');
+const { addRoute, removeRoute, syncState, parseDateInput, formatStatus, formatRoutes, formatFlights, loadRoutes, saveRoutes } = require('./routes');
 
 /**
  * Define slash commands.
@@ -64,6 +64,10 @@ const commands = [
     .addStringOption(opt => opt.setName('action').setDescription('Action to perform').addChoices(
       { name: 'clear', value: 'clear' },
     ).setRequired(false)),
+
+  new SlashCommandBuilder()
+    .setName('sync')
+    .setDescription('Remove stale flight data for routes/dates no longer tracked'),
 ];
 
 /**
@@ -276,6 +280,18 @@ async function handleCommand(interaction, triggerCheck) {
       // Show alert summary
       const { totalFlights, summary } = require('./routes').getStatusSummary();
       await interaction.reply(`📊 Tracking ${totalFlights} flights. Use \`/status\` for details or \`/alerts clear\` to reset.`);
+    }
+  }
+
+  else if (commandName === 'sync') {
+    const result = syncState();
+    if (result.prunedFlights === 0 && result.prunedLastChecked === 0) {
+      await interaction.reply(`✅ State is already in sync. ${result.remainingFlights} tracked flights match current routes.`);
+    } else {
+      const parts = [];
+      if (result.prunedFlights > 0) parts.push(`${result.prunedFlights} stale flight(s)`);
+      if (result.prunedLastChecked > 0) parts.push(`${result.prunedLastChecked} stale check record(s)`);
+      await interaction.reply(`🧹 Synced! Removed ${parts.join(' + ')}. ${result.remainingFlights} flights remaining.`);
     }
   }
 }
