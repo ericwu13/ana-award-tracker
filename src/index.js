@@ -240,15 +240,13 @@ async function main() {
       return;
     }
 
-    // Skip-known-confirmed: optionally skip re-searching combos that already
-    // have confirmed flights in state. DISABLED by default because it creates a
-    // blind spot where GONE detection can't fire — a confirmed flight that vanishes
-    // from ANA won't be detected until RECHECK_HOURS expires, leaving /status
-    // showing false positives. The dedup in processOneResult already prevents
-    // re-alerting for known flights, so re-searching confirmed combos only costs
-    // extra ANA requests, not extra alerts.
-    // Set SKIP_KNOWN_AVAILABLE=true in .env to re-enable if ANA rate limits are
-    // a problem (trades GONE detection latency for fewer requests per cycle).
+    // Skip-known-confirmed: skip re-searching combos that already have confirmed
+    // flights in state (within RECHECK_HOURS). Reduces ANA requests at the cost
+    // of delayed GONE detection (~RECHECK_HOURS + 1 cycle). Safe to enable now
+    // that alert-level flip-flop dampening (lastUpgradeAlert cooldown) prevents
+    // redundant UPGRADE notifications when ANA's yield system toggles availability.
+    // Set SKIP_KNOWN_AVAILABLE=false in .env to re-search every cycle if GONE
+    // detection latency matters more than request volume.
     const skipCombos = new Set();
     let skippedDueToConfirmed = 0;
     if (SKIP_KNOWN_AVAILABLE && state.flights) {
