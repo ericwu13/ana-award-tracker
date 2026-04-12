@@ -128,10 +128,23 @@ async function processOneResult({ route, cabin, date, results }, state) {
         miles: result.miles ?? null,
       };
     } else if (prev.status === 'waitlist' && currentStatus === 'confirmed') {
-      // UPGRADE — alert immediately!
-      console.log(`[Main] 🎉 UPGRADE: ${route} ${date} ${result.flightNumber} waitlist → confirmed!`);
-      const sent = await notifyAvailability(date, { ...result, _statusChange: 'UPGRADED from waitlist' }, route);
-      if (sent) alertsSent++;
+      // UPGRADE — alert only if not flip-flopping (cooldown: 6h).
+      // ANA's yield system can toggle availability between searches, causing
+      // waitlist→confirmed→waitlist→confirmed oscillations on each 60-min cycle.
+      // Without dampening, every upswing triggers a redundant UPGRADE alert.
+      const UPGRADE_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+      const lastAlert = prev.lastUpgradeAlert ? new Date(prev.lastUpgradeAlert).getTime() : 0;
+      const now = Date.now();
+
+      if (now - lastAlert > UPGRADE_COOLDOWN_MS) {
+        console.log(`[Main] 🎉 UPGRADE: ${route} ${date} ${result.flightNumber} waitlist → confirmed!`);
+        const sent = await notifyAvailability(date, { ...result, _statusChange: 'UPGRADED from waitlist' }, route);
+        if (sent) alertsSent++;
+        prev.lastUpgradeAlert = new Date(now).toISOString();
+      } else {
+        const agoMin = Math.round((now - lastAlert) / 60000);
+        console.log(`[Main] ⏳ Suppressed flip-flop: ${route} ${date} ${result.flightNumber} waitlist → confirmed (last alert ${agoMin}min ago)`);
+      }
       prev.status = 'confirmed';
       prev.lastSeen = new Date().toISOString();
       if (result.miles != null) prev.miles = result.miles;
