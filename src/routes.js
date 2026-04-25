@@ -473,12 +473,12 @@ function getStatusSummary() {
 }
 
 /**
- * Format the date for display: "2026-10-04" → "Oct 4"
+ * Format the date for display: "2026-10-04" → "Oct 4 2026"
  */
 function shortDate(dateStr) {
   const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  const [, m, d] = dateStr.split('-');
-  return `${months[parseInt(m) - 1]} ${parseInt(d)}`;
+  const [y, m, d] = dateStr.split('-');
+  return `${months[parseInt(m) - 1]} ${parseInt(d)} ${y}`;
 }
 
 /**
