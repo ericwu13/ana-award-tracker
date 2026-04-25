@@ -353,14 +353,26 @@ async function main() {
     const skippedTasks = [...expectedTasks.entries()].filter(([, s]) => s === 'skipped').map(([k]) => k);
     const skippedCount = skippedTasks.length;
 
-    // Categorize session failures
+    // Categorize session failures. Anything that isn't rate-limited or a CDP
+    // protocol timeout falls into the cookie/login bucket — bucketing protocol
+    // timeouts separately stops them from misleading the user into re-logging
+    // when the actual cause is renderer overload.
     const sessionFailures = allResults.filter(r => r._sessionFailed);
     const rateLimitedSessions = sessionFailures.filter(f => f.rateLimited || f.error === 'RATE_LIMITED');
-    const cookieIssues = sessionFailures.filter(f => !f.rateLimited && f.error !== 'RATE_LIMITED');
+    const protocolTimeouts = sessionFailures.filter(f =>
+      !f.rateLimited && f.error !== 'RATE_LIMITED' &&
+      /Runtime\.callFunctionOn timed out|ProtocolError|Target closed/i.test(f.error || '')
+    );
+    const cookieIssues = sessionFailures.filter(f =>
+      !rateLimitedSessions.includes(f) && !protocolTimeouts.includes(f)
+    );
     if (sessionFailures.length > 0) {
-      console.error(`[Main] ⚠️ ${sessionFailures.length} session(s) failed (${rateLimitedSessions.length} rate-limited, ${cookieIssues.length} cookie/login)`);
+      console.error(`[Main] ⚠️ ${sessionFailures.length} session(s) failed (${rateLimitedSessions.length} rate-limited, ${protocolTimeouts.length} CDP timeout, ${cookieIssues.length} cookie/login)`);
       if (cookieIssues.length > 0) {
         await sendAlert(`⚠️ ${cookieIssues.length} session(s) failed: ${cookieIssues[0].error}\nLog in to ANA in Chrome to refresh cookies.`);
+      }
+      if (protocolTimeouts.length > 0) {
+        await sendAlert(`⚠️ ${protocolTimeouts.length} session(s) failed: Chrome renderer was unresponsive (CDP timeout). Will retry next cycle. No action needed.`);
       }
     }
 
