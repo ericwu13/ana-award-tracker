@@ -128,10 +128,23 @@ async function processOneResult({ route, cabin, date, results }, state) {
         miles: result.miles ?? null,
       };
     } else if (prev.status === 'waitlist' && currentStatus === 'confirmed') {
-      // UPGRADE — alert immediately!
-      console.log(`[Main] 🎉 UPGRADE: ${route} ${date} ${result.flightNumber} waitlist → confirmed!`);
-      const sent = await notifyAvailability(date, { ...result, _statusChange: 'UPGRADED from waitlist' }, route);
-      if (sent) alertsSent++;
+      // UPGRADE — alert only if not flip-flopping (cooldown: 6h).
+      // ANA's yield system can toggle availability between searches, causing
+      // waitlist→confirmed→waitlist→confirmed oscillations on each 60-min cycle.
+      // Without dampening, every upswing triggers a redundant UPGRADE alert.
+      const UPGRADE_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+      const lastAlert = prev.lastUpgradeAlert ? new Date(prev.lastUpgradeAlert).getTime() : 0;
+      const now = Date.now();
+
+      if (now - lastAlert > UPGRADE_COOLDOWN_MS) {
+        console.log(`[Main] 🎉 UPGRADE: ${route} ${date} ${result.flightNumber} waitlist → confirmed!`);
+        const sent = await notifyAvailability(date, { ...result, _statusChange: 'UPGRADED from waitlist' }, route);
+        if (sent) alertsSent++;
+        prev.lastUpgradeAlert = new Date(now).toISOString();
+      } else {
+        const agoMin = Math.round((now - lastAlert) / 60000);
+        console.log(`[Main] ⏳ Suppressed flip-flop: ${route} ${date} ${result.flightNumber} waitlist → confirmed (last alert ${agoMin}min ago)`);
+      }
       prev.status = 'confirmed';
       prev.lastSeen = new Date().toISOString();
       if (result.miles != null) prev.miles = result.miles;
@@ -227,15 +240,13 @@ async function main() {
       return;
     }
 
-    // Skip-known-confirmed: optionally skip re-searching combos that already
-    // have confirmed flights in state. DISABLED by default because it creates a
-    // blind spot where GONE detection can't fire — a confirmed flight that vanishes
-    // from ANA won't be detected until RECHECK_HOURS expires, leaving /status
-    // showing false positives. The dedup in processOneResult already prevents
-    // re-alerting for known flights, so re-searching confirmed combos only costs
-    // extra ANA requests, not extra alerts.
-    // Set SKIP_KNOWN_AVAILABLE=true in .env to re-enable if ANA rate limits are
-    // a problem (trades GONE detection latency for fewer requests per cycle).
+    // Skip-known-confirmed: skip re-searching combos that already have confirmed
+    // flights in state (within RECHECK_HOURS). Reduces ANA requests at the cost
+    // of delayed GONE detection (~RECHECK_HOURS + 1 cycle). Safe to enable now
+    // that alert-level flip-flop dampening (lastUpgradeAlert cooldown) prevents
+    // redundant UPGRADE notifications when ANA's yield system toggles availability.
+    // Set SKIP_KNOWN_AVAILABLE=false in .env to re-search every cycle if GONE
+    // detection latency matters more than request volume.
     const skipCombos = new Set();
     let skippedDueToConfirmed = 0;
     if (SKIP_KNOWN_AVAILABLE && state.flights) {
@@ -342,14 +353,26 @@ async function main() {
     const skippedTasks = [...expectedTasks.entries()].filter(([, s]) => s === 'skipped').map(([k]) => k);
     const skippedCount = skippedTasks.length;
 
-    // Categorize session failures
+    // Categorize session failures. Anything that isn't rate-limited or a CDP
+    // protocol timeout falls into the cookie/login bucket — bucketing protocol
+    // timeouts separately stops them from misleading the user into re-logging
+    // when the actual cause is renderer overload.
     const sessionFailures = allResults.filter(r => r._sessionFailed);
     const rateLimitedSessions = sessionFailures.filter(f => f.rateLimited || f.error === 'RATE_LIMITED');
-    const cookieIssues = sessionFailures.filter(f => !f.rateLimited && f.error !== 'RATE_LIMITED');
+    const protocolTimeouts = sessionFailures.filter(f =>
+      !f.rateLimited && f.error !== 'RATE_LIMITED' &&
+      /Runtime\.callFunctionOn timed out|ProtocolError|Target closed/i.test(f.error || '')
+    );
+    const cookieIssues = sessionFailures.filter(f =>
+      !rateLimitedSessions.includes(f) && !protocolTimeouts.includes(f)
+    );
     if (sessionFailures.length > 0) {
-      console.error(`[Main] ⚠️ ${sessionFailures.length} session(s) failed (${rateLimitedSessions.length} rate-limited, ${cookieIssues.length} cookie/login)`);
+      console.error(`[Main] ⚠️ ${sessionFailures.length} session(s) failed (${rateLimitedSessions.length} rate-limited, ${protocolTimeouts.length} CDP timeout, ${cookieIssues.length} cookie/login)`);
       if (cookieIssues.length > 0) {
         await sendAlert(`⚠️ ${cookieIssues.length} session(s) failed: ${cookieIssues[0].error}\nLog in to ANA in Chrome to refresh cookies.`);
+      }
+      if (protocolTimeouts.length > 0) {
+        await sendAlert(`⚠️ ${protocolTimeouts.length} session(s) failed: Chrome renderer was unresponsive (CDP timeout). Will retry next cycle. No action needed.`);
       }
     }
 
