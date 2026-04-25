@@ -122,6 +122,10 @@ async function getBrowser() {
       chromePath,
       chromiumFlags: ['--disable-backgrounding-occluded-windows'],
     },
+    connectOption: {
+      // Akamai sensor JS can block the renderer event loop under load; 180s default is too tight
+      protocolTimeout: 300000,
+    },
   });
 
   browser.on('disconnected', () => {
