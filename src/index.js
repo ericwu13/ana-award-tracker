@@ -334,6 +334,7 @@ async function main() {
     // Mark each task that was actually attempted
     let checkedCount = 0;
     let rateLimitedCount = 0;
+    let timedOutCount = 0;
     for (const r of allResults) {
       if (r._sessionFailed) continue;
       const key = `${r.route}|${r.date}|${r.cabin}`;
@@ -341,6 +342,11 @@ async function main() {
         if (r._rateLimited) {
           expectedTasks.set(key, 'rate-limited');
           rateLimitedCount++;
+        } else if (r._timedOut) {
+          // Don't stamp lastChecked — keeps this task at the front of the
+          // oldest-first priority sort next cycle so it gets retried promptly.
+          expectedTasks.set(key, 'timed-out');
+          timedOutCount++;
         } else {
           expectedTasks.set(key, 'checked');
           state.lastChecked[key] = Date.now();
@@ -382,6 +388,7 @@ async function main() {
       total: totalExpected,
       checked: checkedCount,
       rateLimited: rateLimitedCount,
+      timedOut: timedOutCount,
       skipped: skippedCount,
       sessionsRateLimited: rateLimitedSessions.length,
       skippedSample: skippedTasks.slice(0, 20),
@@ -420,11 +427,12 @@ async function main() {
     const confirmed = Object.values(state.flights).filter(f => f.status === 'confirmed').length;
     const waitlisted = Object.values(state.flights).filter(f => f.status === 'waitlist').length;
 
-    console.log(`\n[Main] Check complete in ${elapsed}s. ${alertsSent} new alert(s). Coverage: ${checkedCount}/${totalExpected} checked, ${rateLimitedCount} rate-limited, ${skippedCount} skipped. Tracking ${tracked} flights.`);
+    console.log(`\n[Main] Check complete in ${elapsed}s. ${alertsSent} new alert(s). Coverage: ${checkedCount}/${totalExpected} checked, ${rateLimitedCount} rate-limited, ${timedOutCount} timed-out, ${skippedCount} skipped. Tracking ${tracked} flights.`);
 
     // Build a readable coverage line for Discord
     let coverageMsg = `${checkedCount}/${totalExpected} checked`;
     if (rateLimitedCount > 0) coverageMsg += `, ${rateLimitedCount} rate-limited`;
+    if (timedOutCount > 0) coverageMsg += `, ${timedOutCount} timed-out`;
     if (skippedCount > 0) coverageMsg += `, ${skippedCount} skipped`;
     if (skippedDueToConfirmed > 0) coverageMsg += `, ${skippedDueToConfirmed} skipped (already confirmed)`;
     if (rateLimitedSessions.length > 0) {

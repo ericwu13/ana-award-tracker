@@ -65,8 +65,8 @@ async function refreshSession() {
         chromiumFlags: ['--disable-backgrounding-occluded-windows'],
       },
       connectOption: {
-        // Akamai sensor JS can block the renderer event loop under load; 180s default is too tight
-        protocolTimeout: 300000,
+        // Cap CDP at 90s so wedged renderers fail fast; keep-alive runs every 25 min so a quick failure is recoverable.
+        protocolTimeout: 90000,
       },
     });
 

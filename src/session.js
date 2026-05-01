@@ -69,8 +69,9 @@ class Session {
         chromiumFlags: ['--disable-backgrounding-occluded-windows'],
       },
       connectOption: {
-        // Akamai sensor JS can block the renderer event loop under load; 180s default is too tight
-        protocolTimeout: 300000,
+        // Cap CDP at 90s so wedged renderers fail fast and the outer loop can recover.
+        // Healthy searchDate() calls finish well under 60s; 90s gives headroom for occasional Akamai sensor stalls.
+        protocolTimeout: 90000,
       },
     });
 
@@ -614,6 +615,12 @@ async function runParallel(jobs, maxSessions = 4, lastChecked = {}, onResult = n
           }
         } catch (err) {
           session.log(`Error searching ${task.date}: ${err.message}`);
+
+          if (/Runtime\.callFunctionOn timed out|ProtocolError|Target closed/i.test(err.message)) {
+            session._cdpDead = true;
+            allResults.push({ route: `${task.from}→${task.to}`, cabin: task.cabinName, date: task.date, results: [], _timedOut: true });
+            break;
+          }
 
           if (err.rateLimited) {
             consecutiveRateLimits++;
