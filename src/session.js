@@ -84,6 +84,12 @@ class Session {
     this.browser = browser;
     this.page = page;
 
+    // Track virtual mouse position so _moveTo can draw a continuous bezier path
+    // from one element to the next instead of teleporting. Akamai's behavioural
+    // signal looks at cursor trajectories, so jumping around is a flag.
+    this._mouseX = 100 + Math.floor(Math.random() * 1080);
+    this._mouseY = 100 + Math.floor(Math.random() * 700);
+
     // Load cookies
     try {
       if (fs.existsSync(COOKIE_PATH)) {
@@ -305,6 +311,82 @@ class Session {
     } catch (e) {}
   }
 
+  // Visit ana.co.jp, idle, jiggle the mouse, then come back to the search form.
+  // Akamai weighs how long a "user" sits on the entry page before drilling into
+  // the award flow — going from login straight to repeated searches looks like a bot.
+  async _warmUp() {
+    const page = this.page;
+    try {
+      this.log('Warming up...');
+      await page.goto('https://www.ana.co.jp/en/jp/', {
+        waitUntil: 'domcontentloaded', timeout: 30000,
+      });
+      await randomDelay(8000, 15000);
+
+      const moveCount = 2 + Math.floor(Math.random() * 2); // 2 or 3
+      const vp = page.viewport() || { width: 1280, height: 900 };
+      for (let i = 0; i < moveCount; i++) {
+        const x = Math.floor(Math.random() * vp.width);
+        const y = Math.floor(Math.random() * vp.height);
+        await page.mouse.move(x, y);
+        this._mouseX = x;
+        this._mouseY = y;
+        await randomDelay(400, 1200);
+      }
+
+      const backUrl = this.sessionBaseUrl
+        ? this.sessionBaseUrl + (this.sessionParams || '')
+        : 'https://www.ana.co.jp/other/int/meta/0771.html?CONNECTION_KIND=us&LANG=e';
+      await page.goto(backUrl, { waitUntil: 'networkidle2', timeout: 60000 });
+      await randomDelay(2000, 4000);
+
+      this.log('Warm-up done');
+    } catch (e) {
+      this.log(`Warm-up error (continuing): ${e.message}`);
+    }
+  }
+
+  // Trace a curved cursor path from the current virtual position into `selector`.
+  // Quadratic bezier with a random control-point offset so the path isn't a straight
+  // line; 8-12 small steps with 20-40 ms gaps mimics human acceleration.
+  // Lands slightly off-centre because dead-centre clicks are another bot tell.
+  async _moveTo(page, selector) {
+    try {
+      const box = await page.evaluate((sel) => {
+        const el = document.querySelector(sel);
+        if (!el) return null;
+        const r = el.getBoundingClientRect();
+        if (r.width === 0 || r.height === 0) return null;
+        return { x: r.x, y: r.y, width: r.width, height: r.height };
+      }, selector);
+      if (!box) return;
+
+      const targetX = box.x + box.width * (0.3 + Math.random() * 0.4);
+      const targetY = box.y + box.height * (0.3 + Math.random() * 0.4);
+      const startX = this._mouseX;
+      const startY = this._mouseY;
+
+      // Control point offset perpendicular-ish to the line for curvature
+      const ctrlX = (startX + targetX) / 2 + (Math.random() - 0.5) * 120;
+      const ctrlY = (startY + targetY) / 2 + (Math.random() - 0.5) * 120;
+
+      const steps = 8 + Math.floor(Math.random() * 5); // 8..12
+      for (let i = 1; i <= steps; i++) {
+        const t = i / steps;
+        const u = 1 - t;
+        const x = u * u * startX + 2 * u * t * ctrlX + t * t * targetX;
+        const y = u * u * startY + 2 * u * t * ctrlY + t * t * targetY;
+        await page.mouse.move(x, y);
+        await new Promise(r => setTimeout(r, 20 + Math.floor(Math.random() * 21)));
+      }
+
+      this._mouseX = targetX;
+      this._mouseY = targetY;
+    } catch (e) {
+      // Mouse pathing is a behavioural nicety — never let it kill a search.
+    }
+  }
+
   async searchDate({ from, to, date, cabinCode, cabinName }) {
     const page = this.page;
     this.log(`Searching ${from}→${to} ${cabinName} on ${date}`);
@@ -363,6 +445,7 @@ class Session {
     const [year, month, day] = date.split('-');
     const depTextSel = '#departureAirportCode\\:field_pctext';
     const depHiddenSel = '#departureAirportCode\\:field';
+    await this._moveTo(page, depTextSel);
     await page.click(depTextSel).catch(() => {});
     await randomDelay(300, 500);
     await page.evaluate((sel) => { document.querySelector(sel).value = ''; }, depTextSel);
@@ -389,6 +472,7 @@ class Session {
     // Fill arrival
     const arrTextSel = '#arrivalAirportCode\\:field_pctext';
     const arrHiddenSel = '#arrivalAirportCode\\:field';
+    await this._moveTo(page, arrTextSel);
     await page.click(arrTextSel).catch(() => {});
     await randomDelay(300, 500);
     await page.evaluate((sel) => { document.querySelector(sel).value = ''; }, arrTextSel);
@@ -463,11 +547,17 @@ class Session {
       const btns = Array.from(document.querySelectorAll('input[type="submit"]'));
       let btn = btns.find(b => b.value === 'Search' || b.value === '検索する');
       if (!btn) btn = btns.find(b => b.className.includes('btnWidthVariable'));
-      if (btn) { btn.scrollIntoView({ behavior: 'instant', block: 'center' }); return true; }
+      if (btn) {
+        btn.scrollIntoView({ behavior: 'instant', block: 'center' });
+        // Tag the button so _moveTo can find it via a stable selector
+        btn.setAttribute('data-search-submit', '1');
+        return true;
+      }
       return false;
     });
 
     if (submitClicked) {
+      await this._moveTo(page, 'input[type="submit"][data-search-submit="1"]');
       await randomDelay(500, 1000);
       await page.evaluate(() => {
         const btns = Array.from(document.querySelectorAll('input[type="submit"]'));
@@ -584,6 +674,15 @@ async function runParallel(jobs, maxSessions = 4, lastChecked = {}, onResult = n
     sessions.push(session);
 
     try {
+      // Stagger launches so two browsers aren't fingerprinting against Akamai
+      // simultaneously from the same machine. Session 1 (i=0) starts immediately;
+      // each subsequent session adds 20-40s of additional delay.
+      const startDelay = i * (20000 + Math.random() * 20000);
+      if (startDelay > 0) {
+        session.log(`Staggered start: waiting ${Math.round(startDelay / 1000)}s before launch`);
+        await new Promise(r => setTimeout(r, startDelay));
+      }
+
       await session.launch();
       const ok = await session.navigateToSearchForm();
       if (!ok) {
@@ -591,6 +690,8 @@ async function runParallel(jobs, maxSessions = 4, lastChecked = {}, onResult = n
         allResults.push({ _sessionFailed: true, error: 'Cookie expired or login failed', sessionId: i + 1 });
         return;
       }
+
+      await session._warmUp();
 
       let consecutiveRateLimits = 0;
       for (const task of chunk) {
