@@ -205,6 +205,7 @@ async function main() {
   // Initialize Discord bot
   await initDiscord();
 
+  console.log(`\n[Main] === Run started ${new Date().toISOString()} (PID ${process.pid}) ===`);
   console.log('[Main] ANA Award Tracker starting...');
   console.log(`[Main] ${MAX_SESSIONS} parallel sessions | mixed cabin: ${SKIP_MIXED_CABIN ? 'skip' : 'include'} | max layover: ${MAX_LAYOVER_HOURS}h | waitlist: ${ALERT_WAITLIST ? 'alert' : 'skip'}`);
   for (const route of ROUTES) {
@@ -473,7 +474,7 @@ async function main() {
     }
   } finally {
     await destroyDiscord();
-    console.log('[Main] Exiting.');
+    console.log(`[Main] === Run finished ${new Date().toISOString()} exitCode=${process.exitCode || 0} ===\n`);
     process.exit(process.exitCode || 0);
   }
 }
