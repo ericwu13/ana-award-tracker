@@ -387,6 +387,138 @@ class Session {
     }
   }
 
+  // Fill an airport input by driving the autocomplete dropdown and verifying
+  // the result. The form has two coupled inputs per airport:
+  //   *:field         — hidden, holds the IATA code (e.g. "SGN")
+  //   *:field_pctext  — visible text, displays "<code> - <city/airport>"
+  // ANA's server-side validation rejects with "Please select a city or an
+  // airport from the list" when the visible field is missing the formatted
+  // text and the visible input's `onchange="setOnchange(true)"` never fired.
+  // The previous force-set-the-hidden-field safety net dispatched `change` on
+  // the hidden input only, so setOnchange never ran — and any cycle that hit
+  // that path got rejected.
+  //
+  // Strategy: clear → click+type → wait for a visible suggestion containing
+  // the IATA code → click it → verify both fields. Retry once on failure.
+  // As a last resort, force-set both fields AND dispatch `change` on the
+  // visible input so setOnchange(true) runs.
+  async _fillAirport(textSel, hiddenSel, code, label) {
+    const page = this.page;
+    const maxAttempts = 2;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      // Clear any stale value via the dedicated delete icon next to the input
+      // (firing ANA's clear handler), with a JS fallback if the icon isn't reachable.
+      await page.evaluate((tSel) => {
+        const input = document.querySelector(tSel);
+        if (!input) return;
+        const parent = input.parentElement;
+        const del = parent && parent.querySelector('.paxFormIconDelete');
+        if (del) {
+          del.click();
+        } else {
+          input.value = '';
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+      }, textSel);
+      await randomDelay(300, 600);
+
+      await this._moveTo(page, textSel);
+      await page.click(textSel).catch(() => {});
+      await randomDelay(500, 900);
+
+      await page.type(textSel, code, { delay: 130 });
+
+      // Wait up to 3s for the autocomplete dropdown to render at least one
+      // visible item that mentions the typed IATA code. ANA's dropdown isn't
+      // tagged with a stable id, so we look broadly: any visible <li> or <a>
+      // whose text includes the code. Avoid landing on whatever was hovered
+      // before by requiring the textContent to contain the code itself.
+      const dropdownReady = await page.waitForFunction((iata) => {
+        const candidates = Array.from(document.querySelectorAll(
+          'ul li, [role="listbox"] [role="option"], [role="option"], a.airport, .airportList a, .airportList li'
+        ));
+        return candidates.some(el => {
+          if (!el || el.offsetParent === null) return false;
+          const txt = (el.textContent || '').trim();
+          return txt.includes(iata) && txt.length > iata.length;
+        });
+      }, { timeout: 3000 }, code).then(() => true).catch(() => false);
+
+      let clickedSuggestion = false;
+      if (dropdownReady) {
+        clickedSuggestion = await page.evaluate((iata) => {
+          const candidates = Array.from(document.querySelectorAll(
+            'ul li, [role="listbox"] [role="option"], [role="option"], a.airport, .airportList a, .airportList li'
+          ));
+          for (const el of candidates) {
+            if (!el || el.offsetParent === null) continue;
+            const txt = (el.textContent || '').trim();
+            if (txt.includes(iata) && txt.length > iata.length) {
+              // Prefer clicking an inner <a> if present (modal items wrap in <a>)
+              const a = el.querySelector('a');
+              (a || el).click();
+              return true;
+            }
+          }
+          return false;
+        }, code);
+      }
+
+      if (!clickedSuggestion) {
+        // Last-chance keyboard fallback in case the dropdown rendered with
+        // markup we didn't match. ArrowDown+Enter on a populated list still
+        // fires setOnchange via the field's onchange handler.
+        await page.keyboard.press('ArrowDown');
+        await randomDelay(250, 450);
+        await page.keyboard.press('Enter');
+      }
+
+      await randomDelay(1200, 1800);
+
+      // Verify: hidden must equal IATA code AND visible must have more text
+      // than just the code (i.e. autocomplete populated the formatted name).
+      const verify = await page.evaluate((hSel, tSel) => {
+        const h = document.querySelector(hSel);
+        const t = document.querySelector(tSel);
+        return { hidden: (h?.value || ''), visible: (t?.value || '') };
+      }, hiddenSel, textSel);
+
+      const hiddenOk = verify.hidden === code;
+      const visibleOk = verify.visible.length > code.length && verify.visible.includes(code);
+      if (hiddenOk && visibleOk) {
+        return true;
+      }
+
+      this.log(`⚠️ ${label} autocomplete attempt ${attempt}/${maxAttempts} failed (hidden="${verify.hidden}" visible="${verify.visible}"). Retrying...`);
+      await randomDelay(800, 1400);
+    }
+
+    // Last-resort fallback: write both fields directly AND fire `change` on
+    // the VISIBLE input so ANA's setOnchange(true) handler runs. This is the
+    // critical bit the old safety net was missing.
+    this.log(`⚠️ ${label} autocomplete failed after ${maxAttempts} attempts; firing change-event fallback`);
+    await page.evaluate((hSel, tSel, iata) => {
+      const h = document.querySelector(hSel);
+      const t = document.querySelector(tSel);
+      if (h) {
+        h.value = iata;
+        h.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+      if (t) {
+        // Don't blank the visible value if autocomplete partially populated it;
+        // only force-write when it doesn't already contain the IATA code.
+        if (!(t.value || '').includes(iata)) t.value = iata;
+        t.dispatchEvent(new Event('change', { bubbles: true }));
+        t.dispatchEvent(new Event('blur', { bubbles: true }));
+      }
+      if (typeof setOnchange === 'function') {
+        try { setOnchange(true); } catch (_) {}
+      }
+    }, hiddenSel, textSel, code);
+    return false;
+  }
+
   async searchDate({ from, to, date, cabinCode, cabinName }) {
     const page = this.page;
     this.log(`Searching ${from}→${to} ${cabinName} on ${date}`);
@@ -441,65 +573,27 @@ class Session {
     }, cabinCode);
     await randomDelay(1000, 2000);
 
-    // Fill departure
+    // Fill departure + arrival via the autocomplete-aware helper. The helper
+    // verifies both fields and ensures ANA's setOnchange(true) flag fires so
+    // the server doesn't reject with "Please select a city or an airport from
+    // the list".
     const [year, month, day] = date.split('-');
     const depTextSel = '#departureAirportCode\\:field_pctext';
     const depHiddenSel = '#departureAirportCode\\:field';
-    await this._moveTo(page, depTextSel);
-    await page.click(depTextSel).catch(() => {});
-    await randomDelay(300, 500);
-    await page.evaluate((sel) => { document.querySelector(sel).value = ''; }, depTextSel);
-    await page.type(depTextSel, from, { delay: 150 });
-    await randomDelay(2000, 3000);
-    await page.keyboard.press('ArrowDown');
-    await randomDelay(300, 500);
-    await page.keyboard.press('Enter');
-    await randomDelay(1500, 2000);
-
-    // Force-set the hidden departure field as a safety net. The autocomplete
-    // flow above (ArrowDown + Enter) USUALLY updates the hidden field, but
-    // intermittently fails when the dropdown is slow or doesn't trigger —
-    // causing the previous search's value to persist and the wrong route
-    // to be searched.
-    await page.evaluate((sel, code) => {
-      const hidden = document.querySelector(sel);
-      if (hidden && hidden.value !== code) {
-        hidden.value = code;
-        hidden.dispatchEvent(new Event('change', { bubbles: true }));
-      }
-    }, depHiddenSel, from);
-
-    // Fill arrival
     const arrTextSel = '#arrivalAirportCode\\:field_pctext';
     const arrHiddenSel = '#arrivalAirportCode\\:field';
-    await this._moveTo(page, arrTextSel);
-    await page.click(arrTextSel).catch(() => {});
-    await randomDelay(300, 500);
-    await page.evaluate((sel) => { document.querySelector(sel).value = ''; }, arrTextSel);
-    await page.type(arrTextSel, to, { delay: 150 });
-    await randomDelay(2000, 3000);
-    await page.keyboard.press('ArrowDown');
-    await randomDelay(300, 500);
-    await page.keyboard.press('Enter');
-    await randomDelay(1500, 2000);
 
-    // Force-set the hidden arrival field (same safety net as departure)
-    await page.evaluate((sel, code) => {
-      const hidden = document.querySelector(sel);
-      if (hidden && hidden.value !== code) {
-        hidden.value = code;
-        hidden.dispatchEvent(new Event('change', { bubbles: true }));
-      }
-    }, arrHiddenSel, to);
+    await this._fillAirport(depTextSel, depHiddenSel, from, 'Departure');
+    await this._fillAirport(arrTextSel, arrHiddenSel, to, 'Arrival');
 
-    // Verify both hidden fields match intended route before submitting
+    // Final cross-check of both hidden fields before we proceed to the date.
     const formCheck = await page.evaluate((depSel, arrSel) => {
       const dep = document.querySelector(depSel);
       const arr = document.querySelector(arrSel);
       return { dep: dep?.value, arr: arr?.value };
     }, depHiddenSel, arrHiddenSel);
     if (formCheck.dep !== from || formCheck.arr !== to) {
-      this.log(`⚠️ Form field mismatch! Expected ${from}→${to}, got ${formCheck.dep}→${formCheck.arr}. Forcing...`);
+      this.log(`⚠️ Form field mismatch after fill! Expected ${from}→${to}, got ${formCheck.dep}→${formCheck.arr}. Forcing...`);
       await page.evaluate((depSel, arrSel, fromCode, toCode) => {
         const dep = document.querySelector(depSel);
         const arr = document.querySelector(arrSel);
