@@ -476,8 +476,18 @@ class Session {
 
       await randomDelay(1200, 1800);
 
-      // Verify: hidden must equal IATA code AND visible must have more text
-      // than just the code (i.e. autocomplete populated the formatted name).
+      // Verify the fill stuck.
+      //
+      // Hidden field MUST equal the requested IATA code. ANA sometimes
+      // populates a metro-area variant like "SGN+" or "TYO" when the typed
+      // code matches multiple airports — that's a real failure since we want
+      // the specific code we asked for.
+      //
+      // Visible field gets the CITY NAME ("San Francisco", "Taipei (All)") —
+      // NOT the IATA code. The earlier check required visible.includes(code),
+      // which failed on every successful fill and produced a noise storm.
+      // Now we just confirm the visible field is non-empty and longer than
+      // the code; an autocomplete-populated name is always > 3 chars.
       const verify = await page.evaluate((hSel, tSel) => {
         const h = document.querySelector(hSel);
         const t = document.querySelector(tSel);
@@ -485,7 +495,7 @@ class Session {
       }, hiddenSel, textSel);
 
       const hiddenOk = verify.hidden === code;
-      const visibleOk = verify.visible.length > code.length && verify.visible.includes(code);
+      const visibleOk = verify.visible.length > code.length;
       if (hiddenOk && visibleOk) {
         return true;
       }
@@ -506,9 +516,12 @@ class Session {
         h.dispatchEvent(new Event('change', { bubbles: true }));
       }
       if (t) {
-        // Don't blank the visible value if autocomplete partially populated it;
-        // only force-write when it doesn't already contain the IATA code.
-        if (!(t.value || '').includes(iata)) t.value = iata;
+        // Only force-write when the visible field is empty or shorter than the
+        // IATA code. Autocomplete writes the city name ("San Francisco") which
+        // never contains the code itself — an earlier version of this check
+        // overwrote those with bare IATA codes and made things worse.
+        const cur = (t.value || '');
+        if (cur.length <= iata.length) t.value = iata;
         t.dispatchEvent(new Event('change', { bubbles: true }));
         t.dispatchEvent(new Event('blur', { bubbles: true }));
       }
