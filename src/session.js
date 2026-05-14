@@ -9,6 +9,11 @@ const { parseResults, parseFlightDetails, getPageDebugInfo } = require('./parser
 
 const COOKIE_PATH = path.join(__dirname, '..', 'data', 'cookies.json');
 
+// Number of form-validation error pages saved to data/ this process. Capped
+// so we don't fill the disk if every search fails — first few captures are
+// enough to tighten the autocomplete flow.
+let formErrorCapturesSaved = 0;
+
 function randomDelay(minMs = 2000, maxMs = 5000) {
   const ms = Math.floor(Math.random() * (maxMs - minMs)) + minMs;
   return new Promise(r => setTimeout(r, ms));
@@ -666,12 +671,22 @@ class Session {
     if (submitClicked) {
       await this._moveTo(page, 'input[type="submit"][data-search-submit="1"]');
       await randomDelay(500, 1000);
-      await page.evaluate(() => {
+
+      // LAST-MILE GUARD: write the hidden fields one final time in the same
+      // microtask that clicks submit. ANA's setOnchange / linkage handlers
+      // can clear hidden fields up to the moment of form serialisation; by
+      // setting them inside the same evaluate() that triggers .click(), we
+      // beat the next tick of their event loop.
+      await page.evaluate((depSel, arrSel, fromCode, toCode) => {
+        const dep = document.querySelector(depSel);
+        const arr = document.querySelector(arrSel);
+        if (dep) dep.value = fromCode;
+        if (arr) arr.value = toCode;
         const btns = Array.from(document.querySelectorAll('input[type="submit"]'));
         let btn = btns.find(b => b.value === 'Search' || b.value === '検索する');
         if (!btn) btn = btns.find(b => b.className.includes('btnWidthVariable'));
         if (btn) btn.click();
-      });
+      }, depHiddenSel, arrHiddenSel, from, to);
     }
 
     // Wait for results
@@ -682,6 +697,43 @@ class Session {
     if (await isRateLimited(page)) {
       const err = new Error('RATE_LIMITED');
       err.rateLimited = true;
+      throw err;
+    }
+
+    // Detect ANA's form-validation error page.
+    //
+    // When the autocomplete leaves a hidden field empty (or with an invalid
+    // value), the server returns a re-rendered search form with an error
+    // summary block. The bot previously misread this page as "no results"
+    // because it has no flight table, no E_A01P01_0006 message, and no
+    // calendar — so coverage counted every form-validation failure as a
+    // successful "checked." This was masking the real bug.
+    const formError = await page.evaluate(() => {
+      const text = document.body?.innerText || '';
+      if (text.includes('errors in the following information you entered')) return true;
+      if (text.includes('Please select a city or an airport from the list')) return true;
+      if (text.includes('入力された情報に誤りがあります')) return true;
+      return false;
+    });
+    if (formError) {
+      this.log(`⛔ Form validation error for ${date} — server rejected the submitted form`);
+      // Save evidence the first few times so we have a real DOM to work with
+      // when tightening the autocomplete flow. Cap saves per-process via a
+      // module-level counter so we don't fill the disk.
+      if (formErrorCapturesSaved < 3) {
+        const stamp = `${date}-${Date.now()}`;
+        try {
+          const html = await page.content();
+          fs.writeFileSync(path.join(__dirname, '..', 'data', `form-error-${stamp}.html`), html);
+          await page.screenshot({ path: path.join(__dirname, '..', 'data', `form-error-${stamp}.png`), fullPage: true });
+          formErrorCapturesSaved++;
+          this.log(`Saved form-error capture: form-error-${stamp}.{html,png}`);
+        } catch (e) {
+          this.log(`Could not save form-error capture: ${e.message}`);
+        }
+      }
+      const err = new Error('FORM_VALIDATION_ERROR');
+      err.formError = true;
       throw err;
     }
 
@@ -843,6 +895,13 @@ async function runParallel(jobs, maxSessions = 4, lastChecked = {}, onResult = n
             // Back off and try next date
             session.log(`Rate limit ${consecutiveRateLimits}/3 — backing off 30s before next search`);
             await new Promise(r => setTimeout(r, 30000));
+            continue;
+          }
+
+          if (err.formError) {
+            // Server rejected the form. Don't stamp lastChecked — keep this
+            // task at the front of the priority queue so it retries next cycle.
+            allResults.push({ route: `${task.from}→${task.to}`, cabin: task.cabinName, date: task.date, results: [], _formError: true });
             continue;
           }
 
