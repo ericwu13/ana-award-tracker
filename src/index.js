@@ -111,7 +111,10 @@ async function processOneResult({ route, cabin, date, results }, state) {
 
     if (!prev) {
       // NEW flight — alert immediately!
-      console.log(`[Main] 🎉 NEW ${currentStatus}: ${route} ${date} ${result.flightNumber || result.cabin} ${result.routeDesc || ''}${result.miles ? ` (${result.miles.toLocaleString()} miles)` : ''}`);
+      const costLog = result.miles
+        ? ` (${result.miles.toLocaleString()} miles${result.taxUsd != null ? ` + $${result.taxUsd.toFixed(2)}` : ''})`
+        : '';
+      console.log(`[Main] 🎉 NEW ${currentStatus}: ${route} ${date} ${result.flightNumber || result.cabin} ${result.routeDesc || ''}${costLog}`);
       const sent = await notifyAvailability(date, result, route);
       if (sent) alertsSent++;
       state.flights[key] = {
@@ -126,6 +129,7 @@ async function processOneResult({ route, cabin, date, results }, state) {
         cabinDesc: result.cabinDesc,
         duration: result.duration,
         miles: result.miles ?? null,
+        taxUsd: result.taxUsd ?? null,
       };
     } else if (prev.status === 'waitlist' && currentStatus === 'confirmed') {
       // UPGRADE — alert only if not flip-flopping (cooldown: 6h).
@@ -148,21 +152,29 @@ async function processOneResult({ route, cabin, date, results }, state) {
       prev.status = 'confirmed';
       prev.lastSeen = new Date().toISOString();
       if (result.miles != null) prev.miles = result.miles;
+      if (result.taxUsd != null) prev.taxUsd = result.taxUsd;
     } else if (prev.status === 'confirmed' && currentStatus === 'waitlist') {
       // DOWNGRADE — log only, don't alert (too noisy)
       console.log(`[Main] ⚠️ DOWNGRADE: ${route} ${date} ${result.flightNumber} confirmed → waitlist`);
       prev.status = 'waitlist';
       prev.lastSeen = new Date().toISOString();
       if (result.miles != null) prev.miles = result.miles;
+      if (result.taxUsd != null) prev.taxUsd = result.taxUsd;
     } else {
-      // STILL AVAILABLE — update lastSeen, detect miles changes
+      // STILL AVAILABLE — update lastSeen, detect miles/tax changes
       prev.lastSeen = new Date().toISOString();
       if (result.miles != null && prev.miles != null && result.miles !== prev.miles) {
         const delta = result.miles - prev.miles;
         const sign = delta > 0 ? '+' : '';
         console.log(`[Main] 💰 MILES CHANGED: ${route} ${date} ${result.flightNumber}: ${prev.miles.toLocaleString()} → ${result.miles.toLocaleString()} (${sign}${delta.toLocaleString()})`);
       }
+      if (result.taxUsd != null && prev.taxUsd != null && result.taxUsd !== prev.taxUsd) {
+        const delta = result.taxUsd - prev.taxUsd;
+        const sign = delta > 0 ? '+' : '';
+        console.log(`[Main] 💵 TAX CHANGED: ${route} ${date} ${result.flightNumber}: $${prev.taxUsd.toFixed(2)} → $${result.taxUsd.toFixed(2)} (${sign}$${delta.toFixed(2)})`);
+      }
       if (result.miles != null) prev.miles = result.miles;
+      if (result.taxUsd != null) prev.taxUsd = result.taxUsd;
     }
   }
 
@@ -193,8 +205,12 @@ async function detectGoneFlights(allResults, state, seenKeys) {
     if (searchedRouteDateCabin.has(combo) && !seenKeys.has(key)) {
       if (flight.status === 'confirmed') {
         console.log(`[Main] ❌ GONE: ${flight.route} ${flight.date} ${flight.flightNumber} was confirmed, now unavailable`);
-        const milesLine = flight.miles ? `\nWas: ${flight.miles.toLocaleString()} miles` : '';
-        await sendAlert(`❌ **Seats gone**: ${flight.flightNumber} ${flight.route} ${flight.date}\n${flight.cabinDesc || ''} — no longer available${milesLine}`);
+        let costLine = '';
+        if (flight.miles) {
+          costLine = `\nWas: ${flight.miles.toLocaleString()} miles`;
+          if (flight.taxUsd != null) costLine += ` + $${flight.taxUsd.toFixed(2)}`;
+        }
+        await sendAlert(`❌ **Seats gone**: ${flight.flightNumber} ${flight.route} ${flight.date}\n${flight.cabinDesc || ''} — no longer available${costLine}`);
       }
       delete state.flights[key];
     }

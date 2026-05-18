@@ -10,8 +10,10 @@
 const assert = require('assert');
 const {
   extractPerFlightMiles,
+  extractPerFlightRecommendations,
   parseCallArgs,
   parseMilesArg,
+  parseNumericArg,
 } = require('../src/parser');
 
 // --- minimal test runner ---------------------------------------------------
@@ -238,6 +240,164 @@ test('REGRESSION: comma inside "57,000" must not split the arg', () => {
   const miles = extractPerFlightMiles(html);
   assert.strictEqual(miles.length, 1);
   assert.strictEqual(miles[0], 57000, 'miles must be 57000, not 57');
+});
+
+// ===========================================================================
+section('parseCallArgs — bracket / brace nesting');
+// ===========================================================================
+
+test('commas inside [...] are not top-level splits', () => {
+  const args = parseCallArgs("1,2,[3,4,5],6");
+  assert.deepStrictEqual(args, ['1', '2', '[3,4,5]', '6']);
+});
+
+test('commas inside {...} are not top-level splits', () => {
+  const args = parseCallArgs("1,{a:1,b:2},3");
+  assert.deepStrictEqual(args, ['1', '{a:1,b:2}', '3']);
+});
+
+test('nested arrays and objects together (addRecommendation tail arg)', () => {
+  const args = parseCallArgs("57000,[{segmentInfoList:[{serviceLevel:800},{serviceLevel:800}]}]");
+  assert.strictEqual(args.length, 2);
+  assert.strictEqual(args[0], '57000');
+  assert.strictEqual(args[1], '[{segmentInfoList:[{serviceLevel:800},{serviceLevel:800}]}]');
+});
+
+// ===========================================================================
+section('parseNumericArg — bare numbers and quoted numbers');
+// ===========================================================================
+
+test('bare integer (addRecommendation miles)', () => {
+  assert.strictEqual(parseNumericArg('57000'), 57000);
+});
+
+test('bare decimal (addRecommendation tax in USD)', () => {
+  assert.strictEqual(parseNumericArg('204.3'), 204.3);
+});
+
+test('quoted integer with comma (addFormatedRecommendation miles)', () => {
+  assert.strictEqual(parseNumericArg("'57,000'"), 57000);
+});
+
+test('quoted decimal (addFormatedRecommendation tax string)', () => {
+  assert.strictEqual(parseNumericArg("'204.30'"), 204.3);
+});
+
+test('null literal → null', () => {
+  assert.strictEqual(parseNumericArg('null'), null);
+});
+
+test('empty string → null', () => {
+  assert.strictEqual(parseNumericArg(''), null);
+});
+
+test('non-numeric → null', () => {
+  assert.strictEqual(parseNumericArg("'NO_NO_RULE'"), null);
+  assert.strictEqual(parseNumericArg('false'), null);
+});
+
+test('zero is valid (free tax for award searches sometimes shows 0.0)', () => {
+  assert.strictEqual(parseNumericArg('0.0'), 0);
+  assert.strictEqual(parseNumericArg("'0.00'"), 0);
+});
+
+// ===========================================================================
+section('extractPerFlightRecommendations — addRecommendation → {miles, taxUsd}');
+// ===========================================================================
+
+const buildRec = (taxUsd, miles, recId = 0, flightId = 7) =>
+  `addRecommendation(${flightId},${recId},null,'800',null,${taxUsd},null,${taxUsd},false,0,null,${miles},'NO_NO_RULE',null,'0',null,0.0,${taxUsd},0,'','',false,'',[{segmentInfoList : [{serviceLevel : 800},{serviceLevel : 800}]}]);`;
+
+test('single flight: 57000 miles + $204.30 tax', () => {
+  const html = `<script>${buildRec(204.3, 57000)}</script>`;
+  assert.deepStrictEqual(extractPerFlightRecommendations(html), [
+    { miles: 57000, taxUsd: 204.3 },
+  ]);
+});
+
+test('five flights (matches real ANA HND→SFO data)', () => {
+  const html = `<script>
+    ${buildRec(204.3, 57000, 0, 7)}
+    ${buildRec(204.3, 57000, 1, 7)}
+    ${buildRec(213.6, 57000, 2, 8)}
+    ${buildRec(213.6, 57000, 3, 8)}
+    ${buildRec(235.1, 65000, 4, 9)}
+  </script>`;
+  assert.deepStrictEqual(extractPerFlightRecommendations(html), [
+    { miles: 57000, taxUsd: 204.3 },
+    { miles: 57000, taxUsd: 204.3 },
+    { miles: 57000, taxUsd: 213.6 },
+    { miles: 57000, taxUsd: 213.6 },
+    { miles: 65000, taxUsd: 235.1 },
+  ]);
+});
+
+test('partner UA flight: low miles (22500) + tax — args 5 and 11 work', () => {
+  // Verifies the addRecommendation positional layout is consistent for
+  // partner-award flights (UA) where the addFormatedRecommendation variant
+  // can shift args due to promo flags.
+  const html = buildRec(56.4, 22500, 0, 0);
+  assert.deepStrictEqual(extractPerFlightRecommendations(html), [
+    { miles: 22500, taxUsd: 56.4 },
+  ]);
+});
+
+test('zero tax flight is preserved (taxUsd === 0, not null)', () => {
+  const html = buildRec(0.0, 30000);
+  assert.deepStrictEqual(extractPerFlightRecommendations(html), [
+    { miles: 30000, taxUsd: 0 },
+  ]);
+});
+
+test('tax with sub-cent precision is rounded to 2 decimals', () => {
+  // Defensive: ANA sometimes emits 204.299999... due to float math
+  const html = `addRecommendation(0,0,null,'800',null,204.299999,null,204.299999,false,0,null,57000,'NO_NO_RULE',null,'0',null,0.0,204.299999,0,'','',false,'',[]);`;
+  const recs = extractPerFlightRecommendations(html);
+  assert.strictEqual(recs[0].taxUsd, 204.3);
+});
+
+test('non-string input → empty array (defensive)', () => {
+  assert.deepStrictEqual(extractPerFlightRecommendations(null), []);
+  assert.deepStrictEqual(extractPerFlightRecommendations(undefined), []);
+  assert.deepStrictEqual(extractPerFlightRecommendations(42), []);
+});
+
+test('no addRecommendation calls → empty array', () => {
+  assert.deepStrictEqual(extractPerFlightRecommendations('<html>no flights</html>'), []);
+});
+
+test('REAL integration: parses data/flight-detail.html (miles + tax pairs)', () => {
+  // The real saved ANA HTML from a previous search. Verified separately to
+  // contain 5 addRecommendation calls matching the 5 flight cards.
+  const fs = require('fs');
+  const path = require('path');
+  let html;
+  try {
+    html = fs.readFileSync(path.join(__dirname, '..', 'data', 'flight-detail.html'), 'utf8');
+  } catch {
+    console.log('    (fixture not present, skipping integration check)');
+    return;
+  }
+  const recs = extractPerFlightRecommendations(html);
+  assert.strictEqual(recs.length, 5, 'should find 5 addRecommendation calls');
+  assert.deepStrictEqual(recs, [
+    { miles: 57000, taxUsd: 204.3 },
+    { miles: 57000, taxUsd: 204.3 },
+    { miles: 57000, taxUsd: 213.6 },
+    { miles: 57000, taxUsd: 213.6 },
+    { miles: 65000, taxUsd: 235.1 },
+  ]);
+});
+
+test('REGRESSION: trailing array arg does not throw off arg indexing', () => {
+  // The 24th arg of addRecommendation is `[{segmentInfoList:[...]}]`. If
+  // parseCallArgs ever loses bracket/brace awareness, commas inside the
+  // array would split into extra args and could shift earlier indices.
+  // We pin the test by checking the values at arg 5 (tax) and 11 (miles).
+  const html = `addRecommendation(0,0,null,'800',null,42.5,null,42.5,false,0,null,12345,'NO_NO_RULE',null,'0',null,0.0,42.5,0,'','',false,'',[{a:[1,2,3],b:{c:4,d:5}}]);`;
+  assert.deepStrictEqual(extractPerFlightRecommendations(html), [
+    { miles: 12345, taxUsd: 42.5 },
+  ]);
 });
 
 // ===========================================================================

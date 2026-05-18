@@ -588,9 +588,11 @@ function formatFlights(from, to, dateInput, cabin) {
     lines.push(`  ${routeInfo}${duration}`);
     if (cabinInfo) lines.push(`  ${cabinInfo}`);
 
-    // Miles line (no taxes — user preference; parser no longer extracts them)
+    // Cost line — miles + cash co-pay for taxes/fees.
     if (f.miles) {
-      lines.push(`  💰 ${f.miles.toLocaleString()} miles`);
+      let cost = `${f.miles.toLocaleString()} miles`;
+      if (f.taxUsd != null) cost += ` + $${f.taxUsd.toFixed(2)}`;
+      lines.push(`  💰 ${cost}`);
     }
 
     lines.push('');
