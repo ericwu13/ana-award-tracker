@@ -91,9 +91,19 @@ async function notifyAvailability(date, result, routeLabel) {
   const flightNum = result.flightNumber || 'N/A';
   const statusChange = result._statusChange || '';
 
-  // Miles required — parser may be unable to extract this for some flights
-  // (e.g., if ANA changes their JS call signature), in which case show "Unknown".
-  const milesValue = result.miles ? `${result.miles.toLocaleString()} miles` : 'Unknown';
+  // Miles + tax/fee co-pay. ANA award tickets require both miles and a cash
+  // payment for taxes/fees — show them together so the user sees the full cost.
+  // The parser may be unable to extract miles for some flights (e.g., if ANA
+  // changes their JS call signature), in which case show "Unknown".
+  let costValue;
+  if (result.miles) {
+    costValue = `${result.miles.toLocaleString()} miles`;
+    if (result.taxUsd != null) {
+      costValue += ` + $${result.taxUsd.toFixed(2)}`;
+    }
+  } else {
+    costValue = 'Unknown';
+  }
 
   const alertChannelId = process.env.DISCORD_ALERT_CHANNEL_ID;
   const color = result.isMixedCabin ? 0xFF6600 : isWaitlist ? 0xFFA500 : 0x00FF00;
@@ -105,7 +115,7 @@ async function notifyAvailability(date, result, routeLabel) {
     fields: [
       { name: 'Status', value: `${status} ${symbol}`, inline: true },
       { name: 'Date', value: date, inline: true },
-      { name: 'Miles', value: milesValue, inline: true },
+      { name: 'Cost', value: costValue, inline: true },
       { name: 'Class', value: cabinDetail, inline: false },
       { name: 'Route', value: `${routeInfo} ${routeType}`, inline: false },
       { name: 'Flight', value: flightNum, inline: true },

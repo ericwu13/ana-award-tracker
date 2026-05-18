@@ -17,23 +17,22 @@ const fs = require('fs');
 const path = require('path');
 
 /**
- * Parse a single addFormatedRecommendation() argument list into a raw
- * string array, respecting single-quoted JS string literals and escape
- * sequences. ANA embeds arguments like:
+ * Parse a comma-separated JS function-call argument list into raw string
+ * tokens. Respects single-quoted string literals (so commas inside `'57,000'`
+ * don't split) and bracket/brace nesting (so commas inside `[{a:1, b:2}]`
+ * also don't split). Returns trimmed token strings — quotes, nulls, numbers,
+ * arrays, and objects are returned in source form.
  *
- *   'USD<br />204.30',null,'204.30','<em class=\"price\">0<\/em>...',null,'57,000',null,...
- *
- * Plain comma-split breaks on the '57,000' value because it contains a
- * literal comma inside a quoted string. This state machine walks the text
- * character-by-character, tracking quote state, so args are split only on
- * top-level commas.
- *
- * Returns an array of trimmed argument strings (quotes and nulls included).
+ * Used to parse both `addFormatedRecommendation('USD<br />204.30',null,'204.30',
+ * '<em class=\"price\">0<\/em>...',null,'57,000',...)` and the structured
+ * sibling `addRecommendation(7,0,null,'800',null,204.3,...,57000,...,
+ * [{segmentInfoList:[{serviceLevel:800}]}])`.
  */
 function parseCallArgs(text) {
   const args = [];
   let current = '';
   let inQuote = false;
+  let depth = 0;
   let i = 0;
   while (i < text.length) {
     const ch = text[i];
@@ -49,7 +48,19 @@ function parseCallArgs(text) {
       i++;
       continue;
     }
-    if (ch === ',' && !inQuote) {
+    if (!inQuote && (ch === '[' || ch === '{')) {
+      depth++;
+      current += ch;
+      i++;
+      continue;
+    }
+    if (!inQuote && (ch === ']' || ch === '}')) {
+      depth--;
+      current += ch;
+      i++;
+      continue;
+    }
+    if (ch === ',' && !inQuote && depth === 0) {
       args.push(current.trim());
       current = '';
       i++;
@@ -78,21 +89,73 @@ function parseMilesArg(arg) {
 }
 
 /**
- * Extract per-flight required-mileage values from ANA's flight results page.
+ * Parse a numeric addRecommendation() argument. Accepts:
+ *   - bare numbers:   `57000`, `204.3`, `0.0`
+ *   - quoted strings: `'57,000'`, `'204.30'`
+ *   - `null` / empty / non-numeric → returns null
  *
- * ANA's page renders the `<span class="label">Required mileage</span>` block
- * only for the currently-selected flight, but the per-flight mileage is
- * available for ALL flights in the inline JavaScript — one
- * `addFormatedRecommendation(...)` call per flight, in the same order as the
- * flight section order in the DOM.
+ * Used for arg 5 (USD taxes/fees) and arg 11 (miles) of addRecommendation,
+ * which emits the canonical numeric values without HTML/currency markup.
+ */
+function parseNumericArg(arg) {
+  if (arg == null) return null;
+  let s = String(arg).trim();
+  if (s === '' || s === 'null') return null;
+  const m = s.match(/^'(.*)'$/);
+  if (m) s = m[1];
+  s = s.replace(/,/g, '');
+  if (!/^-?\d+(?:\.\d+)?$/.test(s)) return null;
+  const n = parseFloat(s);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Extract per-flight {miles, taxUsd} from ANA's flight results page using
+ * the structured `addRecommendation(...)` JS calls — one per flight, same
+ * DOM order as the flight sections.
  *
- * This helper takes the page's HTML source (e.g. `document.documentElement.outerHTML`)
- * and returns an array of miles values, one per flight, in DOM order. Any
- * flight whose call argument couldn't be parsed is null in that slot.
+ * Why addRecommendation and not addFormatedRecommendation:
+ *   addFormatedRecommendation emits HTML strings ('USD<br />204.30', '57,000')
+ *   intended for the display layer. addRecommendation emits the same data as
+ *   raw numbers (204.3, 57000) in a consistent positional layout regardless
+ *   of partner-award flags, mixed-cabin promotions, or peak-season markers
+ *   that can shift positions in the formated variant.
  *
- * Exported for unit testing. The same logic is inlined inside parseFlightDetails'
- * page.evaluate callback because code in that callback runs in the browser
- * context and cannot import module exports.
+ * The argument layout (verified against captured ANA HTML):
+ *   addRecommendation(flightId, recId, null, serviceLevel, null,
+ *                     TAX_USD,          // arg 5  — co-pay in USD (numeric)
+ *                     null, taxUsdAlt, false, 0, null,
+ *                     MILES,            // arg 11 — required mileage (integer)
+ *                     'NO_NO_RULE', ..., [segmentInfoList...]);
+ *
+ * Returns an array of `{ miles, taxUsd }` objects, one per flight, in DOM
+ * order. Either field is null when the call argument can't be parsed.
+ *
+ * Exported for unit testing. The same logic is inlined inside
+ * parseFlightDetails' page.evaluate callback because the browser context
+ * can't import module exports — keep the two copies in sync.
+ */
+function extractPerFlightRecommendations(html) {
+  if (typeof html !== 'string' || html.length === 0) return [];
+  const results = [];
+  const callRegex = /addRecommendation\(([\s\S]*?)\);/g;
+  let match;
+  while ((match = callRegex.exec(html)) !== null) {
+    const args = parseCallArgs(match[1]);
+    const milesNum = args.length > 11 ? parseNumericArg(args[11]) : null;
+    const taxNum   = args.length > 5  ? parseNumericArg(args[5])  : null;
+    const miles  = milesNum != null && Number.isInteger(milesNum) && milesNum > 0 ? milesNum : null;
+    const taxUsd = taxNum  != null && taxNum  >= 0 ? Math.round(taxNum * 100) / 100 : null;
+    results.push({ miles, taxUsd });
+  }
+  return results;
+}
+
+/**
+ * Backward-compatible wrapper around the older addFormatedRecommendation-based
+ * miles extraction. Kept for the legacy parser path and for unit tests.
+ * Prefer `extractPerFlightRecommendations` for new code — it also returns
+ * tax/fee values and uses the more robust numeric-arg source.
  */
 function extractPerFlightMiles(html) {
   if (typeof html !== 'string' || html.length === 0) return [];
@@ -343,24 +406,37 @@ async function parseFlightDetails(page, cabinName = 'Business') {
     const html = document.documentElement?.outerHTML || '';
     const results = [];
 
-    // --- Per-flight miles extraction ---
+    // --- Per-flight miles + tax extraction ---
     // ANA only renders the "Required mileage" label for the currently-selected
-    // flight in the DOM, but embeds per-flight data in inline JavaScript calls:
-    //   addFormatedRecommendation('USD<br />204.30',null,'204.30','<em...>',null,'57,000',...)
-    // One call per flight, in the same DOM order as the flight sections.
-    // The 6th argument (index 5) is the miles value. We parse the call args
-    // with a state machine that respects single-quoted strings so the
-    // '57,000' literal (comma inside quotes) is treated as one argument.
+    // flight in the DOM, but embeds per-flight data in inline JavaScript calls.
+    // Two paired calls are emitted per flight, in the same DOM order as the
+    // flight sections:
+    //
+    //   addRecommendation(7,0,null,'800',null,204.3,null,204.3,false,0,null,
+    //                     57000,'NO_NO_RULE',null,'0',null,0.0,204.3,0,...);
+    //   addFormatedRecommendation('USD<br />204.30',null,'204.30','<em ...>',
+    //                     null,'57,000',null,null,'0.00',...);
+    //
+    // We use the unformated `addRecommendation` call because its arguments are
+    // raw numbers in a fixed positional layout that doesn't shift for partner
+    // awards, mixed-cabin promotions, or peak-season pricing:
+    //   arg  5 = tax/fees in USD (numeric, e.g. 204.3)
+    //   arg 11 = required mileage (integer, e.g. 57000)
+    //
+    // The formated variant interleaves promo flags ('1' instead of null at
+    // arg 6 for mixed-cabin deals etc.) and HTML-wrapped strings, which makes
+    // positional reads less reliable.
     //
     // NOTE: The helpers below are duplicated from parser.js module scope
-    // (parseCallArgs, parseMilesArg, extractPerFlightMiles) because page.evaluate
-    // runs in the browser context and can't import module exports. Keep them
-    // in sync with the exported versions above. Unit tests exercise the
-    // exported copies, so any regex drift between the two will be caught.
+    // (parseCallArgs, parseNumericArg, extractPerFlightRecommendations) because
+    // page.evaluate runs in the browser context and can't import module
+    // exports. Keep them in sync with the exported versions — unit tests
+    // exercise the exported copies so any drift will be caught.
     const parseCallArgs = (text) => {
       const args = [];
       let current = '';
       let inQuote = false;
+      let depth = 0;
       let i = 0;
       while (i < text.length) {
         const ch = text[i];
@@ -369,13 +445,10 @@ async function parseFlightDetails(page, cabinName = 'Business') {
           i += 2;
           continue;
         }
-        if (ch === "'") {
-          inQuote = !inQuote;
-          current += ch;
-          i++;
-          continue;
-        }
-        if (ch === ',' && !inQuote) {
+        if (ch === "'") { inQuote = !inQuote; current += ch; i++; continue; }
+        if (!inQuote && (ch === '[' || ch === '{')) { depth++; current += ch; i++; continue; }
+        if (!inQuote && (ch === ']' || ch === '}')) { depth--; current += ch; i++; continue; }
+        if (ch === ',' && !inQuote && depth === 0) {
           args.push(current.trim());
           current = '';
           i++;
@@ -387,21 +460,28 @@ async function parseFlightDetails(page, cabinName = 'Business') {
       if (current.trim()) args.push(current.trim());
       return args;
     };
-    const parseMilesArg = (arg) => {
-      if (!arg || arg === 'null') return null;
-      const m = arg.match(/^'(.*)'$/);
-      if (!m) return null;
-      if (!/^[\d,]+$/.test(m[1])) return null;
-      const n = parseInt(m[1].replace(/,/g, ''), 10);
-      return Number.isFinite(n) && n > 0 ? n : null;
+    const parseNumericArg = (arg) => {
+      if (arg == null) return null;
+      let s = String(arg).trim();
+      if (s === '' || s === 'null') return null;
+      const m = s.match(/^'(.*)'$/);
+      if (m) s = m[1];
+      s = s.replace(/,/g, '');
+      if (!/^-?\d+(?:\.\d+)?$/.test(s)) return null;
+      const n = parseFloat(s);
+      return Number.isFinite(n) ? n : null;
     };
 
-    const perFlightMiles = [];
-    const callRegex = /addFormatedRecommendation\(([\s\S]*?)\)/g;
+    const perFlightData = [];
+    const callRegex = /addRecommendation\(([\s\S]*?)\);/g;
     let cm;
     while ((cm = callRegex.exec(html)) !== null) {
       const args = parseCallArgs(cm[1]);
-      perFlightMiles.push(args.length >= 6 ? parseMilesArg(args[5]) : null);
+      const milesNum = args.length > 11 ? parseNumericArg(args[11]) : null;
+      const taxNum   = args.length > 5  ? parseNumericArg(args[5])  : null;
+      const miles  = milesNum != null && Number.isInteger(milesNum) && milesNum > 0 ? milesNum : null;
+      const taxUsd = taxNum  != null && taxNum  >= 0 ? Math.round(taxNum * 100) / 100 : null;
+      perFlightData.push({ miles, taxUsd });
     }
     let flightIndex = 0;
 
@@ -492,12 +572,14 @@ async function parseFlightDetails(page, cabinName = 'Business') {
       const durationMatch = section.match(/Total travel time (\d+h\d+min)/);
       const duration = durationMatch ? durationMatch[1] : '';
 
-      // Per-flight miles: the Nth flight section corresponds to the Nth
-      // addFormatedRecommendation() call parsed from the HTML above. If the
-      // mapping runs short (fewer JS calls than flight sections), the slot
-      // is null and the flight simply has no miles data — display code
-      // handles that gracefully.
-      const miles = perFlightMiles[flightIndex] ?? null;
+      // Per-flight miles + tax: the Nth flight section corresponds to the Nth
+      // addRecommendation() call parsed from the HTML above. If the mapping
+      // runs short (fewer JS calls than flight sections), the slot is null
+      // and the flight simply has no miles/tax data — display code handles
+      // that gracefully.
+      const rec = perFlightData[flightIndex] || { miles: null, taxUsd: null };
+      const miles = rec.miles;
+      const taxUsd = rec.taxUsd;
       flightIndex++;
 
       // Build descriptions
@@ -533,6 +615,7 @@ async function parseFlightDetails(page, cabinName = 'Business') {
         routeDesc,
         cabinDesc,
         miles,
+        taxUsd,
         rawText: section.substring(0, 300),
         format: 'flight-detail',
       });
@@ -558,5 +641,6 @@ module.exports = {
   // Pure helpers exposed for unit testing (same logic is inlined inside
   // parseFlightDetails' page.evaluate callback because browser context can't
   // import module exports — tests catch drift between the two copies).
-  extractPerFlightMiles, parseCallArgs, parseMilesArg,
+  extractPerFlightRecommendations, extractPerFlightMiles,
+  parseCallArgs, parseMilesArg, parseNumericArg,
 };
