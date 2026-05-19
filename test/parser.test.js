@@ -11,6 +11,9 @@ const assert = require('assert');
 const {
   extractPerFlightMiles,
   extractPerFlightRecommendations,
+  extractRecommendationsByRecId,
+  extractFlightCardDataValues,
+  extractPerFlightByCard,
   parseCallArgs,
   parseMilesArg,
   parseNumericArg,
@@ -397,6 +400,172 @@ test('REGRESSION: trailing array arg does not throw off arg indexing', () => {
   const html = `addRecommendation(0,0,null,'800',null,42.5,null,42.5,false,0,null,12345,'NO_NO_RULE',null,'0',null,0.0,42.5,0,'','',false,'',[{a:[1,2,3],b:{c:4,d:5}}]);`;
   assert.deepStrictEqual(extractPerFlightRecommendations(html), [
     { miles: 12345, taxUsd: 42.5 },
+  ]);
+});
+
+// ===========================================================================
+section('extractRecommendationsByRecId — Map<recId, {miles, taxUsd}>');
+// ===========================================================================
+
+test('keys by recId (arg 1), not source-code position', () => {
+  // Calls emitted in (flightId, recId) order. recId is the second arg.
+  const html = `
+    addRecommendation(2,4,null,'1200',null,174.43,null,174.43,false,0,null,30000,'NO_NO_RULE',null,'0',null,0.0,174.43,0,'','',false,'',[]);
+    addRecommendation(0,0,null,'1400',null,199.33,null,199.33,false,0,null,22500,'NO_NO_RULE',null,'0',null,0.0,199.33,0,'','',false,'',[]);
+  `;
+  const map = extractRecommendationsByRecId(html);
+  assert.strictEqual(map.size, 2);
+  // Source order put recId=4 first but the map keys it correctly:
+  assert.deepStrictEqual(map.get(4), { miles: 30000, taxUsd: 174.43 });
+  assert.deepStrictEqual(map.get(0), { miles: 22500, taxUsd: 199.33 });
+});
+
+test('empty / non-string input → empty Map', () => {
+  assert.strictEqual(extractRecommendationsByRecId('').size, 0);
+  assert.strictEqual(extractRecommendationsByRecId(null).size, 0);
+  assert.strictEqual(extractRecommendationsByRecId(undefined).size, 0);
+});
+
+test('call with missing/garbage recId is skipped', () => {
+  const html = `
+    addRecommendation(0,null,null,'1400',null,199.33,null,199.33,false,0,null,22500,'NO_NO_RULE',null,'0',null,0.0,199.33,0,'','',false,'',[]);
+    addRecommendation(0,'abc',null,'1400',null,199.33,null,199.33,false,0,null,22500,'NO_NO_RULE',null,'0',null,0.0,199.33,0,'','',false,'',[]);
+  `;
+  assert.strictEqual(extractRecommendationsByRecId(html).size, 0);
+});
+
+// ===========================================================================
+section('extractFlightCardDataValues — DOM-order radio data-values');
+// ===========================================================================
+
+test('reads data-value from radio inside td.selectItineraryCheck', () => {
+  const html = `
+    <tbody>
+      <tr><td class="selectItineraryCheck"><i role="button" data-value="4"></i></td></tr>
+      <tr><td class="selectItineraryCheck"><i role="button" data-value="5"></i></td></tr>
+      <tr><td class="selectItineraryCheck"><i role="button" data-value="0"></i></td></tr>
+    </tbody>
+  `;
+  assert.deepStrictEqual(extractFlightCardDataValues(html), [4, 5, 0]);
+});
+
+test('tolerates extra classes on the td (real ANA HTML has multiple)', () => {
+  const html = `<td class="something selectItineraryCheck other" onclick="..."><i role="button" data-value="9"></i></td>`;
+  assert.deepStrictEqual(extractFlightCardDataValues(html), [9]);
+});
+
+test('no cards on page → empty array', () => {
+  assert.deepStrictEqual(extractFlightCardDataValues('<html>nothing here</html>'), []);
+});
+
+test('empty / non-string input → empty array (defensive)', () => {
+  assert.deepStrictEqual(extractFlightCardDataValues(''), []);
+  assert.deepStrictEqual(extractFlightCardDataValues(null), []);
+  assert.deepStrictEqual(extractFlightCardDataValues(undefined), []);
+});
+
+// ===========================================================================
+section('extractPerFlightByCard — composes the two above (DOM card order)');
+// ===========================================================================
+
+test('reorders recommendations to match flight-card DOM order', () => {
+  // Calls in recId order (0, 1, 2). Cards displayed in (2, 0, 1) order.
+  const html = `
+    addRecommendation(0,0,null,'1400',null,100,null,100,false,0,null,10000,'X',null,'0',null,0,100,0,'','',false,'',[]);
+    addRecommendation(0,1,null,'1400',null,200,null,200,false,0,null,20000,'X',null,'0',null,0,200,0,'','',false,'',[]);
+    addRecommendation(0,2,null,'1400',null,300,null,300,false,0,null,30000,'X',null,'0',null,0,300,0,'','',false,'',[]);
+    <td class="selectItineraryCheck"><i role="button" data-value="2"></i></td>
+    <td class="selectItineraryCheck"><i role="button" data-value="0"></i></td>
+    <td class="selectItineraryCheck"><i role="button" data-value="1"></i></td>
+  `;
+  assert.deepStrictEqual(extractPerFlightByCard(html), [
+    { miles: 30000, taxUsd: 300 }, // card[0] dv=2 → recId 2
+    { miles: 10000, taxUsd: 100 }, // card[1] dv=0 → recId 0
+    { miles: 20000, taxUsd: 200 }, // card[2] dv=1 → recId 1
+  ]);
+});
+
+test('card whose data-value has no matching recommendation → {null, null}', () => {
+  const html = `
+    addRecommendation(0,0,null,'1400',null,100,null,100,false,0,null,10000,'X',null,'0',null,0,100,0,'','',false,'',[]);
+    <td class="selectItineraryCheck"><i role="button" data-value="0"></i></td>
+    <td class="selectItineraryCheck"><i role="button" data-value="7"></i></td>
+  `;
+  assert.deepStrictEqual(extractPerFlightByCard(html), [
+    { miles: 10000, taxUsd: 100 },
+    { miles: null, taxUsd: null },
+  ]);
+});
+
+// ===========================================================================
+section('REAL fixtures — captured live from ANA on 2026-05-19');
+// ===========================================================================
+
+test('REAL: TPE→SFO 2026-06-25 economy — by-card mapping matches click-through', () => {
+  // Live-captured HTML for the user-reported bug case. The click-through
+  // diagnostic (selecting UA872 → next-step page) showed actual cost as
+  // "30,000 Miles + USD174.43". This confirms the by-card mapping returns
+  // exactly that — proving the parser bug was the sequential mapping, not
+  // missing tax data.
+  //
+  // Display order on the page (confirmed first, then waitlist) doesn't
+  // match the addRecommendation source order (by recId), so the old
+  // sequential parser silently pulled the wrong row for every flight.
+  //
+  // Card order (data-value → recId → expected):
+  //   [0] UA872 confirmed       dv=4 → 30,000 + $174.43  ← was wrongly 22,500
+  //   [1] UA852 confirmed       dv=5 → 30,000 + $174.43  ← was wrongly 22,500
+  //   [2] NH854+NH108 waitlist  dv=0 → 22,500 + $199.33
+  //   [3] NH852+NH108 waitlist  dv=1 → 22,500 + $199.33
+  //   [4] NH854+NH008 waitlist  dv=2 → 22,500 + $209.93  ← was wrongly 30,000
+  //   [5] NH852+NH008 waitlist  dv=3 → 22,500 + $209.93  ← was wrongly 30,000
+  //
+  // Fixture is gitignored (in data/). Re-capture via:
+  //   node diag-tpe-sfo-live.js   (from parent project root)
+  const fs = require('fs');
+  const path = require('path');
+  let html;
+  try {
+    html = fs.readFileSync(path.join(__dirname, '..', 'data', 'flight-detail-tpe-sfo-2026-06-25.html'), 'utf8');
+  } catch {
+    console.log('    (live-capture fixture not present, skipping)');
+    return;
+  }
+  assert.deepStrictEqual(extractFlightCardDataValues(html), [4, 5, 0, 1, 2, 3],
+    'card data-values should be [4,5,0,1,2,3] (confirmed-first display sort)');
+  assert.deepStrictEqual(extractPerFlightByCard(html), [
+    { miles: 30000, taxUsd: 174.43 }, // UA872
+    { miles: 30000, taxUsd: 174.43 }, // UA852
+    { miles: 22500, taxUsd: 199.33 }, // NH854+NH108
+    { miles: 22500, taxUsd: 199.33 }, // NH852+NH108
+    { miles: 22500, taxUsd: 209.93 }, // NH854+NH008
+    { miles: 22500, taxUsd: 209.93 }, // NH852+NH008
+  ]);
+});
+
+test('REAL: SFO→TPE 2026-08-09 economy — by-card mapping (BR/UA/NH split)', () => {
+  // Companion capture from the same diagnostic run. addRecommendation source
+  // order: recIds [4,5,0,1,2,3]. Card data-values: [0,1,2,3,4,5]. The buggy
+  // sequential mapping wrongly assigned BR027 (slot 0) recId 4's value
+  // (39,500) when its actual price is recId 0's value (30,000). Pins the
+  // corrected output.
+  const fs = require('fs');
+  const path = require('path');
+  let html;
+  try {
+    html = fs.readFileSync(path.join(__dirname, '..', 'data', 'flight-detail-sfo-tpe-2026-08-09.html'), 'utf8');
+  } catch {
+    console.log('    (live-capture fixture not present, skipping)');
+    return;
+  }
+  assert.deepStrictEqual(extractFlightCardDataValues(html), [0, 1, 2, 3, 4, 5]);
+  assert.deepStrictEqual(extractPerFlightByCard(html), [
+    { miles: 30000, taxUsd: 239 },    // BR027 (partner)
+    { miles: 30000, taxUsd: 239 },    // BR007 (partner)
+    { miles: 30000, taxUsd: 279 },    // UA871 (partner)
+    { miles: 30000, taxUsd: 279 },    // UA853 (partner)
+    { miles: 39500, taxUsd: 313.2 },  // NH007+NH851 (ANA-only — higher chart)
+    { miles: 39500, taxUsd: 313.2 },  // NH007+NH853 (ANA-only)
   ]);
 });
 
