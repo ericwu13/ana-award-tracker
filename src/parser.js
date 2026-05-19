@@ -400,8 +400,80 @@ async function parseResults(page, cabinName = 'Economy') {
  *   ...
  *   Total travel time 20h25min ← duration
  */
+// Module-level guard so we dump diagnostic flight-detail HTML at most a
+// limited number of times per run-once.js invocation. run-once.js spawns a
+// fresh process every 60 min so this counter resets each cycle.
+let _flightDetailDumpsThisRun = 0;
+const _FLIGHT_DETAIL_DUMP_CAP = parseInt(process.env.FLIGHT_DETAIL_DUMP_CAP || '5', 10);
+
 async function parseFlightDetails(page, cabinName = 'Business') {
-  return page.evaluate((cabinNameArg) => {
+  // Diagnostic: dump full flight-detail HTML + extracted recommendation args
+  // for the first few pages we parse this cycle. Bounded by a per-process cap
+  // so disk usage stays reasonable (~450 KB × cap). Set FLIGHT_DETAIL_DUMP_CAP=0
+  // in .env to disable entirely once we've collected enough samples.
+  //
+  // Why this is here: we've been parsing miles values from addRecommendation
+  // arg 11 and addFormatedRecommendation arg 5, but for some partner-award
+  // peak-season flights (e.g. UA872 TPE→SFO 2026-06-25) both calls report
+  // 22,500 while ANA's site displays 30,000. We need real HTML to find out
+  // where the displayed value lives — likely a surcharge field we haven't
+  // identified, or a different per-cabin recommendation slot.
+  let diagSidecarPath = null;
+  if (_flightDetailDumpsThisRun < _FLIGHT_DETAIL_DUMP_CAP) {
+    try {
+      const url = page.url();
+      const diagFromBrowser = await page.evaluate(() => {
+        const html = document.documentElement?.outerHTML || '';
+        // Pull every addRecommendation + addFormatedRecommendation call so we
+        // can inspect the full positional args side-by-side later.
+        const recCalls = [];
+        const recRegex = /addRecommendation\(([\s\S]*?)\);/g;
+        let m;
+        while ((m = recRegex.exec(html)) !== null) recCalls.push(m[1]);
+        const fmtCalls = [];
+        const fmtRegex = /addFormatedRecommendation\(([\s\S]*?)\);/g;
+        while ((m = fmtRegex.exec(html)) !== null) fmtCalls.push(m[1]);
+        // Pull every DOM mileage value we can find — the "Required mileage"
+        // label (selected flight only), the "From X miles" summary table,
+        // and any other `<em class="price">N,NNN</em>...Miles` pattern.
+        const milesDom = [];
+        const priceEms = document.querySelectorAll('em.price');
+        priceEms.forEach((em) => {
+          const after = em.nextElementSibling ? em.nextElementSibling.textContent : '';
+          const before = em.previousElementSibling ? em.previousElementSibling.textContent : '';
+          milesDom.push({
+            text: em.textContent,
+            classes: em.className,
+            before: before.substring(0, 80),
+            after: after.substring(0, 80),
+            parentClasses: em.parentElement ? em.parentElement.className : '',
+          });
+        });
+        return { html, recCalls, fmtCalls, milesDom };
+      });
+
+      const dumpDir = path.join(__dirname, '..', 'data', 'flight-detail-dumps');
+      try { fs.mkdirSync(dumpDir, { recursive: true }); } catch (e) {}
+      const ts = new Date().toISOString().replace(/[:.]/g, '-');
+      const safeCabin = String(cabinName).replace(/[^a-zA-Z0-9]/g, '_');
+      const htmlPath = path.join(dumpDir, `flight-detail-${ts}-${safeCabin}.html`);
+      diagSidecarPath = path.join(dumpDir, `flight-detail-${ts}-${safeCabin}.diag.json`);
+      fs.writeFileSync(htmlPath, `<!-- DIAG URL: ${url} -->\n<!-- DIAG cabin: ${cabinName} -->\n<!-- DIAG ts: ${ts} -->\n${diagFromBrowser.html}`);
+      fs.writeFileSync(diagSidecarPath, JSON.stringify({
+        url, cabin: cabinName, ts,
+        recCalls: diagFromBrowser.recCalls,
+        fmtCalls: diagFromBrowser.fmtCalls,
+        milesDom: diagFromBrowser.milesDom,
+      }, null, 2));
+      console.log(`[Parser] [DIAG] Saved flight-detail HTML+diag (${_flightDetailDumpsThisRun + 1}/${_FLIGHT_DETAIL_DUMP_CAP}) for ${cabinName} → ${htmlPath}`);
+      _flightDetailDumpsThisRun++;
+    } catch (err) {
+      console.error('[Parser] [DIAG] Failed to dump flight-detail:', err.message);
+      diagSidecarPath = null;
+    }
+  }
+
+  const results = await page.evaluate((cabinNameArg) => {
     const bodyText = document.body?.innerText || '';
     const html = document.documentElement?.outerHTML || '';
     const results = [];
@@ -472,18 +544,33 @@ async function parseFlightDetails(page, cabinName = 'Business') {
       return Number.isFinite(n) ? n : null;
     };
 
+    // Capture both call types so the diagnostic log can show them side-by-side.
+    // The parser still uses addRecommendation arg 11 / 5 for miles/tax until
+    // we have a confirmed fix, but logging both helps us spot the divergent
+    // peak-season case (e.g. UA partner where both calls say 22,500 but ANA
+    // displays 30,000).
     const perFlightData = [];
-    const callRegex = /addRecommendation\(([\s\S]*?)\);/g;
+    const recRawArgs = [];
+    const fmtRawArgs = [];
+    const recRegex = /addRecommendation\(([\s\S]*?)\);/g;
     let cm;
-    while ((cm = callRegex.exec(html)) !== null) {
+    while ((cm = recRegex.exec(html)) !== null) {
       const args = parseCallArgs(cm[1]);
+      recRawArgs.push(args);
       const milesNum = args.length > 11 ? parseNumericArg(args[11]) : null;
       const taxNum   = args.length > 5  ? parseNumericArg(args[5])  : null;
       const miles  = milesNum != null && Number.isInteger(milesNum) && milesNum > 0 ? milesNum : null;
       const taxUsd = taxNum  != null && taxNum  >= 0 ? Math.round(taxNum * 100) / 100 : null;
       perFlightData.push({ miles, taxUsd });
     }
+    const fmtRegex = /addFormatedRecommendation\(([\s\S]*?)\);/g;
+    while ((cm = fmtRegex.exec(html)) !== null) {
+      fmtRawArgs.push(parseCallArgs(cm[1]));
+    }
     let flightIndex = 0;
+    // Diagnostic match-log collected per flight section so we can correlate
+    // section → recommendation slot → JS call args after the cycle finishes.
+    const diagFlightMatches = [];
 
     // Split by "Flight" prefix
     const sections = bodyText.split(/(?=Flight[A-Z]{2}\d)/);
@@ -580,6 +667,14 @@ async function parseFlightDetails(page, cabinName = 'Business') {
       const rec = perFlightData[flightIndex] || { miles: null, taxUsd: null };
       const miles = rec.miles;
       const taxUsd = rec.taxUsd;
+      diagFlightMatches.push({
+        sectionIndex: flightIndex,
+        flightNumbers: flights,
+        matchedMiles: miles,
+        matchedTaxUsd: taxUsd,
+        recArgsAtSlot: recRawArgs[flightIndex] || null,
+        fmtArgsAtSlot: fmtRawArgs[flightIndex] || null,
+      });
       flightIndex++;
 
       // Build descriptions
@@ -621,8 +716,53 @@ async function parseFlightDetails(page, cabinName = 'Business') {
       });
     }
 
+    // Attach diagnostic match log to the first result so the caller can pick
+    // it up (page.evaluate can't touch fs directly). Stored under a leading-
+    // underscore key so it survives JSON serialization and never collides with
+    // real flight-result fields. Caller writes it to a sidecar file and then
+    // strips these keys before passing results downstream.
+    if (results.length > 0) {
+      results[0]._diagMatches = diagFlightMatches;
+      results[0]._diagSectionCount = diagFlightMatches.length;
+      results[0]._diagRecCallCount = recRawArgs.length;
+      results[0]._diagFmtCallCount = fmtRawArgs.length;
+    }
+
     return results;
   }, cabinName);
+
+  // Append the per-flight match log to the sidecar diag file (best effort —
+  // a write failure here must not break the search), then strip the _diag*
+  // keys so downstream code never sees them.
+  if (diagSidecarPath && results.length > 0) {
+    const first = results[0];
+    const matchLog = {
+      sectionCount: first._diagSectionCount,
+      recCallCount: first._diagRecCallCount,
+      fmtCallCount: first._diagFmtCallCount,
+      matches: first._diagMatches,
+    };
+    try {
+      const existing = JSON.parse(fs.readFileSync(diagSidecarPath, 'utf8'));
+      existing.matchLog = matchLog;
+      // Flag the mismatch case prominently so it's easy to grep for.
+      if (matchLog.sectionCount !== matchLog.recCallCount ||
+          matchLog.sectionCount !== matchLog.fmtCallCount) {
+        existing._WARN_callCountMismatch = true;
+      }
+      fs.writeFileSync(diagSidecarPath, JSON.stringify(existing, null, 2));
+      console.log(`[Parser] [DIAG] Match log: ${matchLog.sectionCount} sections vs ${matchLog.recCallCount} addRecommendation vs ${matchLog.fmtCallCount} addFormatedRecommendation calls`);
+    } catch (err) {
+      console.error('[Parser] [DIAG] Failed to append match log:', err.message);
+    }
+  }
+  if (results.length > 0) {
+    delete results[0]._diagMatches;
+    delete results[0]._diagSectionCount;
+    delete results[0]._diagRecCallCount;
+    delete results[0]._diagFmtCallCount;
+  }
+  return results;
 }
 
 async function getPageDebugInfo(page) {
