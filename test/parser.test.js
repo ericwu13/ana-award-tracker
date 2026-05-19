@@ -570,6 +570,196 @@ test('REAL: SFO→TPE 2026-08-09 economy — by-card mapping (BR/UA/NH split)', 
 });
 
 // ===========================================================================
+section('REGRESSION — data-value mapping (bug fixed 2026-05-19)');
+// ===========================================================================
+//
+// Context for these tests: ANA's flight-detail page emits two ordered things:
+//
+//   1. addRecommendation() JS calls in recId order (0, 1, 2, ...).
+//   2. Flight cards in the DOM in display-sort order — typically all
+//      confirmed itineraries first, then waitlisted ones.
+//
+// When those two orders disagree (which they almost always do for any search
+// returning a mix of confirmed and waitlisted flights), the original parser
+// mapped them positionally — "Nth bodyText section → Nth addRecommendation
+// call" — and pulled the wrong row for every flight on the page.
+//
+// The user reported the symptom on UA872 TPE→SFO 2026-06-25: the bot said
+// 22,500 miles, ANA's actual booking page (verified via click-through) said
+// 30,000 miles. Both values were correct values that lived on the page —
+// just attached to different itineraries.
+//
+// The fix: each flight card's radio button has data-value="N" where N is
+// the recId of the matching addRecommendation. Look up by data-value, not
+// by position. These tests pin that behavior to prevent silent regression.
+
+// Reusable synthetic-HTML builder: ANA-shaped addRecommendation call.
+const buildAddRec = ({ flightId = 0, recId, serviceLevel = '1400', tax, miles }) =>
+  `addRecommendation(${flightId},${recId},null,'${serviceLevel}',null,${tax},null,${tax},false,0,null,${miles},'NO_NO_RULE',null,'0',null,0.0,${tax},0,'','',false,'',[]);`;
+
+// Reusable synthetic-HTML builder: ANA-shaped flight card.
+const buildCard = (label, dataValue, extras = '') =>
+  `<tbody><tr><td class="selectItineraryCheck" onclick="changeItineraryFlight($(this).find('i[role=button]'));">
+     <i role="button" id="departureRadioGroup:departureFlight:${dataValue}:departureFlight__selectSegment:radioItem" data-value="${dataValue}"></i>
+     <label class="visuallyHidden">${label}</label>
+   </td>
+   <td class="selectItineraryDetail">${extras}</td>
+   </tr></tbody>`;
+
+test('REGRESSION: calls in recId order [0..4], cards in display order — map by data-value not position', () => {
+  // ANA emitted calls sequentially by recId (0,1,2,3,4) but the DOM displays
+  // cards in a different order — say card[0] points to recId 3, card[1] to
+  // recId 1, etc. The parser MUST look up by data-value, not position.
+  const calls = [
+    buildAddRec({ flightId: 0, recId: 0, tax: 100, miles: 10000 }),
+    buildAddRec({ flightId: 0, recId: 1, tax: 200, miles: 20000 }),
+    buildAddRec({ flightId: 1, recId: 2, tax: 300, miles: 30000 }),
+    buildAddRec({ flightId: 1, recId: 3, tax: 400, miles: 40000 }),
+    buildAddRec({ flightId: 2, recId: 4, tax: 500, miles: 50000 }),
+  ].join('\n');
+  // Display order is shuffled: card[0]=recId 3, card[1]=4, card[2]=0, card[3]=2, card[4]=1.
+  const cards = [
+    buildCard('FlightA', 3),
+    buildCard('FlightB', 4),
+    buildCard('FlightC', 0),
+    buildCard('FlightD', 2),
+    buildCard('FlightE', 1),
+  ].join('\n');
+  const html = `<script>${calls}</script>${cards}`;
+
+  // Sanity: the deprecated source-order extractor still returns calls in
+  // recId order [0..4], independent of display.
+  assert.deepStrictEqual(extractPerFlightRecommendations(html), [
+    { miles: 10000, taxUsd: 100 },
+    { miles: 20000, taxUsd: 200 },
+    { miles: 30000, taxUsd: 300 },
+    { miles: 40000, taxUsd: 400 },
+    { miles: 50000, taxUsd: 500 },
+  ]);
+
+  // The fix: by-card output is in DOM order and reflects each card's data-value.
+  assert.deepStrictEqual(extractFlightCardDataValues(html), [3, 4, 0, 2, 1]);
+  assert.deepStrictEqual(extractPerFlightByCard(html), [
+    { miles: 40000, taxUsd: 400 }, // card[0] dv=3 → recId 3
+    { miles: 50000, taxUsd: 500 }, // card[1] dv=4 → recId 4
+    { miles: 10000, taxUsd: 100 }, // card[2] dv=0 → recId 0
+    { miles: 30000, taxUsd: 300 }, // card[3] dv=2 → recId 2
+    { miles: 20000, taxUsd: 200 }, // card[4] dv=1 → recId 1
+  ]);
+});
+
+test('REGRESSION: UA872 (confirmed, top of display list) gets 30,000 miles — not 22,500', () => {
+  // The exact user-reported scenario, in synthetic form. ANA emits calls in
+  // recId order but lists UA872 (confirmed) FIRST in the DOM with data-value=4.
+  // Positional mapping would assign UA872 the value from recId 0 (22,500) —
+  // wrong. By-card mapping correctly assigns recId 4's value (30,000).
+  const html = `
+    <script>
+      ${buildAddRec({ flightId: 1, recId: 0, serviceLevel: '1400', tax: 199.33, miles: 22500 })}
+      ${buildAddRec({ flightId: 1, recId: 1, serviceLevel: '1400', tax: 199.33, miles: 22500 })}
+      ${buildAddRec({ flightId: 2, recId: 2, serviceLevel: '1400', tax: 209.93, miles: 22500 })}
+      ${buildAddRec({ flightId: 2, recId: 3, serviceLevel: '1400', tax: 209.93, miles: 22500 })}
+      ${buildAddRec({ flightId: 0, recId: 4, serviceLevel: '1200', tax: 174.43, miles: 30000 })}
+      ${buildAddRec({ flightId: 0, recId: 5, serviceLevel: '1200', tax: 174.43, miles: 30000 })}
+    </script>
+    ${buildCard('FlightUA872', 4)}
+    ${buildCard('FlightUA852', 5)}
+    ${buildCard('FlightNH854,NH108', 0)}
+    ${buildCard('FlightNH852,NH108', 1)}
+    ${buildCard('FlightNH854,NH008', 2)}
+    ${buildCard('FlightNH852,NH008', 3)}
+  `;
+
+  const byCard = extractPerFlightByCard(html);
+  // UA872 is card[0]; ANA's actual price for it is 30,000 miles.
+  assert.strictEqual(byCard[0].miles, 30000, 'UA872 (card[0]) MUST be 30,000 miles, not 22,500');
+  assert.strictEqual(byCard[1].miles, 30000, 'UA852 (card[1]) MUST be 30,000 miles, not 22,500');
+});
+
+test('REGRESSION: UA partner = 30,000 and ANA-only = 22,500 on the same page', () => {
+  // Same search returns flights with DIFFERENT fare buckets. Card display
+  // order is unrelated to which carrier; the parser must price each by its
+  // own data-value lookup, not by sequential coincidence.
+  const html = `
+    <script>
+      ${buildAddRec({ recId: 0, tax: 199.33, miles: 22500 })}
+      ${buildAddRec({ recId: 1, tax: 174.43, miles: 30000 })}
+    </script>
+    ${buildCard('FlightUA872', 1)}
+    ${buildCard('FlightNH854,NH108', 0)}
+  `;
+  const byCard = extractPerFlightByCard(html);
+  assert.strictEqual(byCard[0].miles, 30000, 'UA872 (UA partner) → 30,000');
+  assert.strictEqual(byCard[1].miles, 22500, 'NH854+NH108 (ANA only) → 22,500');
+});
+
+test('REGRESSION: tax follows the flight via data-value, not display position', () => {
+  // Same setup, focusing on tax: the lower-tax recommendation (174.43) MUST
+  // be attached to the flight whose card data-value points to it, even
+  // though that card appears first in the display.
+  const html = `
+    <script>
+      ${buildAddRec({ recId: 0, tax: 199.33, miles: 22500 })}
+      ${buildAddRec({ recId: 1, tax: 174.43, miles: 30000 })}
+    </script>
+    ${buildCard('FlightUA872', 1)}
+    ${buildCard('FlightNH854,NH108', 0)}
+  `;
+  const byCard = extractPerFlightByCard(html);
+  assert.strictEqual(byCard[0].taxUsd, 174.43, 'UA872 tax MUST be $174.43 (recId 1), NOT $199.33');
+  assert.strictEqual(byCard[1].taxUsd, 199.33, 'NH854+NH108 tax MUST be $199.33 (recId 0)');
+});
+
+test('REGRESSION: real captured ANA HTML — assert miles + tax per flight number', () => {
+  // Ground-truth check against the live capture from 2026-05-19 (TPE→SFO
+  // 2026-06-25 economy). Iterates each flight card by its visible flight
+  // number — not by slot index — so a future display-order change doesn't
+  // mask a real regression. Fixture is gitignored; gracefully skips if absent.
+  //
+  // Re-capture via:  node diag-tpe-sfo-live.js   (from parent project root)
+  const fs = require('fs');
+  const path = require('path');
+  let html;
+  try {
+    html = fs.readFileSync(path.join(__dirname, '..', 'data', 'flight-detail-tpe-sfo-2026-06-25.html'), 'utf8');
+  } catch {
+    console.log('    (live-capture fixture not present, skipping)');
+    return;
+  }
+
+  // Pull each card's flight number (label) in DOM order so we can assert
+  // by name. The radio's label.visuallyHidden carries "FlightXXNNN[,YYNNN]".
+  const labels = [];
+  const labelRegex = /<label[^>]*class="visuallyHidden"[^>]*>(Flight[^<]+)<\/label>/g;
+  let m;
+  while ((m = labelRegex.exec(html)) !== null) labels.push(m[1]);
+
+  const byCard = extractPerFlightByCard(html);
+  assert.strictEqual(labels.length, byCard.length,
+    'flight-card labels and by-card results must align 1:1');
+
+  // Build a flight-number → {miles, taxUsd} map and assert each value.
+  // Expected values verified by clicking each confirmed flight in the live
+  // diagnostic and reading ANA's "Required mileage" / "Taxes/Fees" labels
+  // on the resulting next-step page.
+  const byFlight = {};
+  labels.forEach((label, i) => { byFlight[label] = byCard[i]; });
+
+  assert.deepStrictEqual(byFlight['FlightUA872'], { miles: 30000, taxUsd: 174.43 },
+    'UA872 MUST be 30,000 + $174.43 (verified via click-through 2026-05-19)');
+  assert.deepStrictEqual(byFlight['FlightUA852'], { miles: 30000, taxUsd: 174.43 },
+    'UA852 MUST be 30,000 + $174.43');
+  assert.deepStrictEqual(byFlight['FlightNH854,NH108'], { miles: 22500, taxUsd: 199.33 },
+    'NH854+NH108 MUST be 22,500 + $199.33');
+  assert.deepStrictEqual(byFlight['FlightNH852,NH108'], { miles: 22500, taxUsd: 199.33 },
+    'NH852+NH108 MUST be 22,500 + $199.33');
+  assert.deepStrictEqual(byFlight['FlightNH854,NH008'], { miles: 22500, taxUsd: 209.93 },
+    'NH854+NH008 MUST be 22,500 + $209.93');
+  assert.deepStrictEqual(byFlight['FlightNH852,NH008'], { miles: 22500, taxUsd: 209.93 },
+    'NH852+NH008 MUST be 22,500 + $209.93');
+});
+
+// ===========================================================================
 // Summary
 // ===========================================================================
 console.log(`\n${'='.repeat(60)}`);
