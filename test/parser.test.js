@@ -302,14 +302,24 @@ test('zero is valid (free tax for award searches sometimes shows 0.0)', () => {
 });
 
 // ===========================================================================
-section('extractPerFlightRecommendations — addRecommendation → {miles, taxUsd}');
+section('extractPerFlightRecommendations — addFormatedRecommendation → {miles, taxUsd}');
 // ===========================================================================
 
-const buildRec = (taxUsd, miles, recId = 0, flightId = 7) =>
-  `addRecommendation(${flightId},${recId},null,'800',null,${taxUsd},null,${taxUsd},false,0,null,${miles},'NO_NO_RULE',null,'0',null,0.0,${taxUsd},0,'','',false,'',[{segmentInfoList : [{serviceLevel : 800},{serviceLevel : 800}]}]);`;
+// Build a paired addRecommendation + addFormatedRecommendation block. ANA
+// always emits both per flight; the parser reads from the formated call
+// because its arg 5 is the displayed/charged mileage (seasonal surcharges
+// already applied) — the unformated call's arg 11 is the bare award-chart
+// base which is NOT what the user pays.
+const buildPair = ({ baseMiles, displayMiles, taxUsd, recId = 0, flightId = 7, flag = null }) => {
+  const flagArg = flag == null ? 'null' : `'${flag}'`;
+  return `
+    addRecommendation(${flightId},${recId},null,'800',null,${taxUsd},null,${taxUsd},false,0,null,${baseMiles},'NO_NO_RULE',null,'0',null,0.0,${taxUsd},0,'','',false,'',[{segmentInfoList : [{serviceLevel : 800},{serviceLevel : 800}]}]);
+    addFormatedRecommendation('USD<br />${taxUsd.toFixed(2)}',null,'${taxUsd.toFixed(2)}','<em class=\\"price\\">0<\\/em><span class=\\"currencyCode\\">Miles<\\/span>',null,'${displayMiles}',${flagArg},null,'0.00','From USD<br />${taxUsd.toFixed(2)}',null,'','','','','','From USD<br />0.00','');
+  `;
+};
 
 test('single flight: 57000 miles + $204.30 tax', () => {
-  const html = `<script>${buildRec(204.3, 57000)}</script>`;
+  const html = buildPair({ baseMiles: 57000, displayMiles: '57,000', taxUsd: 204.3 });
   assert.deepStrictEqual(extractPerFlightRecommendations(html), [
     { miles: 57000, taxUsd: 204.3 },
   ]);
@@ -317,11 +327,11 @@ test('single flight: 57000 miles + $204.30 tax', () => {
 
 test('five flights (matches real ANA HND→SFO data)', () => {
   const html = `<script>
-    ${buildRec(204.3, 57000, 0, 7)}
-    ${buildRec(204.3, 57000, 1, 7)}
-    ${buildRec(213.6, 57000, 2, 8)}
-    ${buildRec(213.6, 57000, 3, 8)}
-    ${buildRec(235.1, 65000, 4, 9)}
+    ${buildPair({ baseMiles: 57000, displayMiles: '57,000', taxUsd: 204.3, recId: 0, flightId: 7 })}
+    ${buildPair({ baseMiles: 57000, displayMiles: '57,000', taxUsd: 204.3, recId: 1, flightId: 7 })}
+    ${buildPair({ baseMiles: 57000, displayMiles: '57,000', taxUsd: 213.6, recId: 2, flightId: 8 })}
+    ${buildPair({ baseMiles: 57000, displayMiles: '57,000', taxUsd: 213.6, recId: 3, flightId: 8 })}
+    ${buildPair({ baseMiles: 65000, displayMiles: '65,000', taxUsd: 235.1, recId: 4, flightId: 9, flag: '1' })}
   </script>`;
   assert.deepStrictEqual(extractPerFlightRecommendations(html), [
     { miles: 57000, taxUsd: 204.3 },
@@ -332,26 +342,28 @@ test('five flights (matches real ANA HND→SFO data)', () => {
   ]);
 });
 
-test('partner UA flight: low miles (22500) + tax — args 5 and 11 work', () => {
-  // Verifies the addRecommendation positional layout is consistent for
-  // partner-award flights (UA) where the addFormatedRecommendation variant
-  // can shift args due to promo flags.
-  const html = buildRec(56.4, 22500, 0, 0);
+test('REGRESSION: UA TPE→SFO peak season → use displayed 30,000 not base 22,500', () => {
+  // Reported case: UA872 on 2026-06-25 (peak summer). The bare award chart
+  // base is 22,500 (NA↔Asia 2, partner, one-way, economy). ANA's actual
+  // displayed/charged price for peak dates is 30,000. The formated call's
+  // arg 5 shows '30,000' — that's the value we must surface to the user.
+  // The unformated call's arg 11 shows 22500 (base, before surcharge).
+  const html = buildPair({ baseMiles: 22500, displayMiles: '30,000', taxUsd: 80.3, flightId: 0 });
   assert.deepStrictEqual(extractPerFlightRecommendations(html), [
-    { miles: 22500, taxUsd: 56.4 },
+    { miles: 30000, taxUsd: 80.3 },
   ]);
 });
 
 test('zero tax flight is preserved (taxUsd === 0, not null)', () => {
-  const html = buildRec(0.0, 30000);
+  const html = buildPair({ baseMiles: 30000, displayMiles: '30,000', taxUsd: 0 });
   assert.deepStrictEqual(extractPerFlightRecommendations(html), [
     { miles: 30000, taxUsd: 0 },
   ]);
 });
 
 test('tax with sub-cent precision is rounded to 2 decimals', () => {
-  // Defensive: ANA sometimes emits 204.299999... due to float math
-  const html = `addRecommendation(0,0,null,'800',null,204.299999,null,204.299999,false,0,null,57000,'NO_NO_RULE',null,'0',null,0.0,204.299999,0,'','',false,'',[]);`;
+  // ANA sometimes emits 204.299999... due to float math in the formatter
+  const html = `addFormatedRecommendation('USD<br />204.30',null,'204.299999','<em ...>',null,'57,000',null,null,'0.00','');`;
   const recs = extractPerFlightRecommendations(html);
   assert.strictEqual(recs[0].taxUsd, 204.3);
 });
@@ -362,13 +374,13 @@ test('non-string input → empty array (defensive)', () => {
   assert.deepStrictEqual(extractPerFlightRecommendations(42), []);
 });
 
-test('no addRecommendation calls → empty array', () => {
+test('no addFormatedRecommendation calls → empty array', () => {
   assert.deepStrictEqual(extractPerFlightRecommendations('<html>no flights</html>'), []);
 });
 
 test('REAL integration: parses data/flight-detail.html (miles + tax pairs)', () => {
-  // The real saved ANA HTML from a previous search. Verified separately to
-  // contain 5 addRecommendation calls matching the 5 flight cards.
+  // The real saved ANA HTML from a previous search (HND→SFO, off-peak so the
+  // chart-base and displayed miles happen to agree at 57,000 / 65,000).
   const fs = require('fs');
   const path = require('path');
   let html;
@@ -379,24 +391,13 @@ test('REAL integration: parses data/flight-detail.html (miles + tax pairs)', () 
     return;
   }
   const recs = extractPerFlightRecommendations(html);
-  assert.strictEqual(recs.length, 5, 'should find 5 addRecommendation calls');
+  assert.strictEqual(recs.length, 5, 'should find 5 addFormatedRecommendation calls');
   assert.deepStrictEqual(recs, [
     { miles: 57000, taxUsd: 204.3 },
     { miles: 57000, taxUsd: 204.3 },
     { miles: 57000, taxUsd: 213.6 },
     { miles: 57000, taxUsd: 213.6 },
     { miles: 65000, taxUsd: 235.1 },
-  ]);
-});
-
-test('REGRESSION: trailing array arg does not throw off arg indexing', () => {
-  // The 24th arg of addRecommendation is `[{segmentInfoList:[...]}]`. If
-  // parseCallArgs ever loses bracket/brace awareness, commas inside the
-  // array would split into extra args and could shift earlier indices.
-  // We pin the test by checking the values at arg 5 (tax) and 11 (miles).
-  const html = `addRecommendation(0,0,null,'800',null,42.5,null,42.5,false,0,null,12345,'NO_NO_RULE',null,'0',null,0.0,42.5,0,'','',false,'',[{a:[1,2,3],b:{c:4,d:5}}]);`;
-  assert.deepStrictEqual(extractPerFlightRecommendations(html), [
-    { miles: 12345, taxUsd: 42.5 },
   ]);
 });
 

@@ -111,22 +111,30 @@ function parseNumericArg(arg) {
 
 /**
  * Extract per-flight {miles, taxUsd} from ANA's flight results page using
- * the structured `addRecommendation(...)` JS calls — one per flight, same
- * DOM order as the flight sections.
+ * the `addFormatedRecommendation(...)` JS calls — one per flight, same DOM
+ * order as the flight sections.
  *
- * Why addRecommendation and not addFormatedRecommendation:
- *   addFormatedRecommendation emits HTML strings ('USD<br />204.30', '57,000')
- *   intended for the display layer. addRecommendation emits the same data as
- *   raw numbers (204.3, 57000) in a consistent positional layout regardless
- *   of partner-award flags, mixed-cabin promotions, or peak-season markers
- *   that can shift positions in the formated variant.
+ * Why addFormatedRecommendation and NOT the unformated addRecommendation:
+ *   The paired addRecommendation(...) call emits the **base award-chart**
+ *   mileage (arg 11) — e.g. 22,500 for a one-way partner economy NA↔Asia 2
+ *   ticket. That number is what the chart says, but it is NOT what ANA
+ *   actually charges: seasonal surcharges (low/regular/peak) are applied on
+ *   top, so a peak-summer UA TPE→SFO flight prices at 30,000 miles on the
+ *   site even though arg 11 shows 22,500. The formated call's arg 5 ('30,000')
+ *   matches the displayed/charged value because it has the surcharge baked in.
  *
  * The argument layout (verified against captured ANA HTML):
- *   addRecommendation(flightId, recId, null, serviceLevel, null,
- *                     TAX_USD,          // arg 5  — co-pay in USD (numeric)
- *                     null, taxUsdAlt, false, 0, null,
- *                     MILES,            // arg 11 — required mileage (integer)
- *                     'NO_NO_RULE', ..., [segmentInfoList...]);
+ *   addFormatedRecommendation('USD<br />204.30',  // arg 0 — display string
+ *                             null,
+ *                             '204.30',           // arg 2 — tax/fee USD (plain decimal)
+ *                             '<em ...>0 Miles', // arg 3 — display markup
+ *                             null,
+ *                             '57,000',           // arg 5 — required mileage (comma int)
+ *                             null|'1',           // arg 6 — promo flag (mixed cabin etc.)
+ *                             ...);
+ *
+ * Both arg 5 (miles) and arg 2 (tax) come from the SAME call, so they stay
+ * in sync per flight by construction.
  *
  * Returns an array of `{ miles, taxUsd }` objects, one per flight, in DOM
  * order. Either field is null when the call argument can't be parsed.
@@ -138,14 +146,13 @@ function parseNumericArg(arg) {
 function extractPerFlightRecommendations(html) {
   if (typeof html !== 'string' || html.length === 0) return [];
   const results = [];
-  const callRegex = /addRecommendation\(([\s\S]*?)\);/g;
+  const callRegex = /addFormatedRecommendation\(([\s\S]*?)\)/g;
   let match;
   while ((match = callRegex.exec(html)) !== null) {
     const args = parseCallArgs(match[1]);
-    const milesNum = args.length > 11 ? parseNumericArg(args[11]) : null;
-    const taxNum   = args.length > 5  ? parseNumericArg(args[5])  : null;
-    const miles  = milesNum != null && Number.isInteger(milesNum) && milesNum > 0 ? milesNum : null;
-    const taxUsd = taxNum  != null && taxNum  >= 0 ? Math.round(taxNum * 100) / 100 : null;
+    const miles  = args.length > 5 ? parseMilesArg(args[5]) : null;
+    const taxNum = args.length > 2 ? parseNumericArg(args[2]) : null;
+    const taxUsd = taxNum != null && taxNum >= 0 ? Math.round(taxNum * 100) / 100 : null;
     results.push({ miles, taxUsd });
   }
   return results;
@@ -408,30 +415,32 @@ async function parseFlightDetails(page, cabinName = 'Business') {
 
     // --- Per-flight miles + tax extraction ---
     // ANA only renders the "Required mileage" label for the currently-selected
-    // flight in the DOM, but embeds per-flight data in inline JavaScript calls.
-    // Two paired calls are emitted per flight, in the same DOM order as the
-    // flight sections:
+    // flight in the DOM, but embeds per-flight data in two paired inline JS
+    // calls per flight, in the same DOM order as the flight sections:
     //
     //   addRecommendation(7,0,null,'800',null,204.3,null,204.3,false,0,null,
-    //                     57000,'NO_NO_RULE',null,'0',null,0.0,204.3,0,...);
+    //                     22500,'NO_NO_RULE',null,'0',null,0.0,204.3,0,...);
     //   addFormatedRecommendation('USD<br />204.30',null,'204.30','<em ...>',
-    //                     null,'57,000',null,null,'0.00',...);
+    //                     null,'30,000',null,null,'0.00',...);
     //
-    // We use the unformated `addRecommendation` call because its arguments are
-    // raw numbers in a fixed positional layout that doesn't shift for partner
-    // awards, mixed-cabin promotions, or peak-season pricing:
-    //   arg  5 = tax/fees in USD (numeric, e.g. 204.3)
-    //   arg 11 = required mileage (integer, e.g. 57000)
+    // We read from the formated call because its arg 5 is the **displayed/
+    // charged** mileage with seasonal surcharges baked in (e.g. peak-summer
+    // 30,000 for UA partner TPE→SFO economy). The unformated call's arg 11
+    // is the **base** award-chart price (22,500) before surcharges — that's
+    // a real value internally but NOT what the user pays, so reading it
+    // produces wrong notifications.
     //
-    // The formated variant interleaves promo flags ('1' instead of null at
-    // arg 6 for mixed-cabin deals etc.) and HTML-wrapped strings, which makes
-    // positional reads less reliable.
+    // Arg layout:
+    //   arg 2 = tax/fee in USD ('204.30' — plain decimal string)
+    //   arg 5 = required mileage ('30,000' — comma-formatted integer)
+    //
+    // Both fields come from the same call so they stay in sync per flight.
     //
     // NOTE: The helpers below are duplicated from parser.js module scope
-    // (parseCallArgs, parseNumericArg, extractPerFlightRecommendations) because
-    // page.evaluate runs in the browser context and can't import module
-    // exports. Keep them in sync with the exported versions — unit tests
-    // exercise the exported copies so any drift will be caught.
+    // (parseCallArgs, parseMilesArg, parseNumericArg, extractPerFlightRecommendations)
+    // because page.evaluate runs in the browser context and can't import
+    // module exports. Keep them in sync — unit tests exercise the exported
+    // copies so any drift will be caught.
     const parseCallArgs = (text) => {
       const args = [];
       let current = '';
@@ -460,6 +469,14 @@ async function parseFlightDetails(page, cabinName = 'Business') {
       if (current.trim()) args.push(current.trim());
       return args;
     };
+    const parseMilesArg = (arg) => {
+      if (!arg || arg === 'null') return null;
+      const m = arg.match(/^'(.*)'$/);
+      if (!m) return null;
+      if (!/^[\d,]+$/.test(m[1])) return null;
+      const n = parseInt(m[1].replace(/,/g, ''), 10);
+      return Number.isFinite(n) && n > 0 ? n : null;
+    };
     const parseNumericArg = (arg) => {
       if (arg == null) return null;
       let s = String(arg).trim();
@@ -473,14 +490,13 @@ async function parseFlightDetails(page, cabinName = 'Business') {
     };
 
     const perFlightData = [];
-    const callRegex = /addRecommendation\(([\s\S]*?)\);/g;
+    const callRegex = /addFormatedRecommendation\(([\s\S]*?)\)/g;
     let cm;
     while ((cm = callRegex.exec(html)) !== null) {
       const args = parseCallArgs(cm[1]);
-      const milesNum = args.length > 11 ? parseNumericArg(args[11]) : null;
-      const taxNum   = args.length > 5  ? parseNumericArg(args[5])  : null;
-      const miles  = milesNum != null && Number.isInteger(milesNum) && milesNum > 0 ? milesNum : null;
-      const taxUsd = taxNum  != null && taxNum  >= 0 ? Math.round(taxNum * 100) / 100 : null;
+      const miles  = args.length > 5 ? parseMilesArg(args[5]) : null;
+      const taxNum = args.length > 2 ? parseNumericArg(args[2]) : null;
+      const taxUsd = taxNum != null && taxNum >= 0 ? Math.round(taxNum * 100) / 100 : null;
       perFlightData.push({ miles, taxUsd });
     }
     let flightIndex = 0;
