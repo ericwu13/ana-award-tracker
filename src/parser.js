@@ -110,30 +110,105 @@ function parseNumericArg(arg) {
 }
 
 /**
- * Extract per-flight {miles, taxUsd} from ANA's flight results page using
- * the structured `addRecommendation(...)` JS calls — one per flight, same
- * DOM order as the flight sections.
+ * Extract per-recommendation {miles, taxUsd} from ANA's flight results page,
+ * keyed by recId (the second arg of `addRecommendation(...)`).
  *
- * Why addRecommendation and not addFormatedRecommendation:
- *   addFormatedRecommendation emits HTML strings ('USD<br />204.30', '57,000')
- *   intended for the display layer. addRecommendation emits the same data as
- *   raw numbers (204.3, 57000) in a consistent positional layout regardless
- *   of partner-award flags, mixed-cabin promotions, or peak-season markers
- *   that can shift positions in the formated variant.
- *
- * The argument layout (verified against captured ANA HTML):
- *   addRecommendation(flightId, recId, null, serviceLevel, null,
+ * Argument layout (verified against captured ANA HTML):
+ *   addRecommendation(flightId, RECID, null, serviceLevel, null,
  *                     TAX_USD,          // arg 5  — co-pay in USD (numeric)
  *                     null, taxUsdAlt, false, 0, null,
  *                     MILES,            // arg 11 — required mileage (integer)
  *                     'NO_NO_RULE', ..., [segmentInfoList...]);
  *
- * Returns an array of `{ miles, taxUsd }` objects, one per flight, in DOM
- * order. Either field is null when the call argument can't be parsed.
+ * Why we use addRecommendation and not addFormatedRecommendation:
+ *   The formated variant emits HTML strings intended for the display layer
+ *   and interleaves promo flags. The unformated call emits raw numbers in a
+ *   stable positional layout regardless of partner-award flags or peak-season
+ *   markers — much safer to read positionally.
+ *
+ * Why keyed by recId and not source-code position:
+ *   ANA emits addRecommendation calls in recId order (0, 1, 2, ...). The
+ *   page's flight cards render in display-sort order (typically confirmed
+ *   first, then waitlisted). Those two orders frequently disagree, so any
+ *   caller that maps "Nth bodyText flight section → Nth addRecommendation
+ *   call" pulls the wrong row. Callers must look up by recId (read from
+ *   the flight card's radio-button `data-value`) — see
+ *   `extractFlightCardDataValues` and the parseFlightDetails inline logic.
+ *
+ * Returns a Map<recId, {miles, taxUsd}>. Calls missing recId or unparseable
+ * miles/tax are skipped or have null values for the affected field.
  *
  * Exported for unit testing. The same logic is inlined inside
  * parseFlightDetails' page.evaluate callback because the browser context
  * can't import module exports — keep the two copies in sync.
+ */
+function extractRecommendationsByRecId(html) {
+  const out = new Map();
+  if (typeof html !== 'string' || html.length === 0) return out;
+  const callRegex = /addRecommendation\(([\s\S]*?)\);/g;
+  let match;
+  while ((match = callRegex.exec(html)) !== null) {
+    const args = parseCallArgs(match[1]);
+    if (args.length < 12) continue;
+    const recId = parseInt(args[1], 10);
+    if (!Number.isFinite(recId)) continue;
+    const milesNum = parseNumericArg(args[11]);
+    const taxNum   = parseNumericArg(args[5]);
+    const miles  = milesNum != null && Number.isInteger(milesNum) && milesNum > 0 ? milesNum : null;
+    const taxUsd = taxNum  != null && taxNum  >= 0 ? Math.round(taxNum * 100) / 100 : null;
+    out.set(recId, { miles, taxUsd });
+  }
+  return out;
+}
+
+/**
+ * Extract the `data-value` attribute of each flight card's radio button on
+ * the search results page, in DOM order. The data-value equals the recId
+ * of the matching `addRecommendation` call — caller composes the two to get
+ * per-flight miles/tax in the order they're displayed to the user.
+ *
+ * The radio sits inside `td.selectItineraryCheck` for each itinerary row;
+ * we match the first `data-value="N"` attribute inside each such cell.
+ *
+ * Returns an array of integers in DOM order, with NaN for any card whose
+ * data-value couldn't be parsed (kept rather than dropped so positional
+ * alignment with bodyText flight sections is preserved).
+ *
+ * Exported for unit testing. The parseFlightDetails inline equivalent uses
+ * document.querySelectorAll instead of regex — same semantics either way.
+ */
+function extractFlightCardDataValues(html) {
+  if (typeof html !== 'string' || html.length === 0) return [];
+  const out = [];
+  const cardRegex = /<td[^>]*class="[^"]*selectItineraryCheck[^"]*"[^>]*>[\s\S]*?data-value="(\d+)"/g;
+  let m;
+  while ((m = cardRegex.exec(html)) !== null) {
+    out.push(parseInt(m[1], 10));
+  }
+  return out;
+}
+
+/**
+ * Convenience: produce per-flight {miles, taxUsd} in DOM card order by
+ * composing extractRecommendationsByRecId with extractFlightCardDataValues.
+ * This is what the parseFlightDetails inline code does, exposed as a pure
+ * helper for unit testing against real-HTML fixtures.
+ *
+ * Returns an array of `{ miles, taxUsd }` in the same order as the flight
+ * cards appear on the page. Entries are `{ miles: null, taxUsd: null }`
+ * when the card's data-value or its recommendation row couldn't be resolved.
+ */
+function extractPerFlightByCard(html) {
+  const recsByRecId = extractRecommendationsByRecId(html);
+  const dataValues = extractFlightCardDataValues(html);
+  return dataValues.map(dv => recsByRecId.get(dv) || { miles: null, taxUsd: null });
+}
+
+/**
+ * DEPRECATED: returns addRecommendation data in source-code order, which
+ * does NOT line up with the page's flight-card display order. Kept for
+ * backward compatibility with older tests; new code should use
+ * `extractPerFlightByCard` or compose the two helpers above.
  */
 function extractPerFlightRecommendations(html) {
   if (typeof html !== 'string' || html.length === 0) return [];
@@ -408,29 +483,30 @@ async function parseFlightDetails(page, cabinName = 'Business') {
 
     // --- Per-flight miles + tax extraction ---
     // ANA only renders the "Required mileage" label for the currently-selected
-    // flight in the DOM, but embeds per-flight data in inline JavaScript calls.
-    // Two paired calls are emitted per flight, in the same DOM order as the
-    // flight sections:
+    // flight in the DOM. Per-flight data lives in inline JS calls:
     //
-    //   addRecommendation(7,0,null,'800',null,204.3,null,204.3,false,0,null,
-    //                     57000,'NO_NO_RULE',null,'0',null,0.0,204.3,0,...);
-    //   addFormatedRecommendation('USD<br />204.30',null,'204.30','<em ...>',
-    //                     null,'57,000',null,null,'0.00',...);
+    //   addRecommendation(flightId, RECID, null, serviceLevel, null,
+    //                     TAX_USD, null, taxUsdAlt, false, 0, null,
+    //                     MILES, 'NO_NO_RULE', ..., [segmentInfoList...]);
     //
-    // We use the unformated `addRecommendation` call because its arguments are
-    // raw numbers in a fixed positional layout that doesn't shift for partner
-    // awards, mixed-cabin promotions, or peak-season pricing:
-    //   arg  5 = tax/fees in USD (numeric, e.g. 204.3)
-    //   arg 11 = required mileage (integer, e.g. 57000)
+    // Arg layout:
+    //   arg  1 = recId (matches the flight card's radio data-value)
+    //   arg  5 = tax/fees in USD (numeric, e.g. 174.43)
+    //   arg 11 = required mileage (integer, e.g. 30000)
     //
-    // The formated variant interleaves promo flags ('1' instead of null at
-    // arg 6 for mixed-cabin deals etc.) and HTML-wrapped strings, which makes
-    // positional reads less reliable.
+    // CRITICAL: ANA emits these calls in recId order (0, 1, 2, ...). The
+    // page's flight cards render in display-sort order (typically confirmed
+    // first, then waitlisted), which frequently disagrees with recId order.
+    // We MUST look up each flight card's miles/tax via its radio button's
+    // `data-value` attribute (= recId), not by sequential position in the
+    // call list. Live capture proved this: UA872 TPE→SFO 6/25 has data-value
+    // 4, and sequential mapping (slot 0 → call slot 0) pulled the wrong row
+    // (22,500) instead of recId 4's actual 30,000.
     //
     // NOTE: The helpers below are duplicated from parser.js module scope
-    // (parseCallArgs, parseNumericArg, extractPerFlightRecommendations) because
-    // page.evaluate runs in the browser context and can't import module
-    // exports. Keep them in sync with the exported versions — unit tests
+    // (parseCallArgs, parseNumericArg, extractRecommendationsByRecId,
+    // extractFlightCardDataValues) because page.evaluate runs in the browser
+    // context and can't import module exports. Keep them in sync — unit tests
     // exercise the exported copies so any drift will be caught.
     const parseCallArgs = (text) => {
       const args = [];
@@ -472,18 +548,32 @@ async function parseFlightDetails(page, cabinName = 'Business') {
       return Number.isFinite(n) ? n : null;
     };
 
-    const perFlightData = [];
+    // Build a Map<recId, {miles, taxUsd}> from every addRecommendation call.
+    const recsByRecId = new Map();
     const callRegex = /addRecommendation\(([\s\S]*?)\);/g;
     let cm;
     while ((cm = callRegex.exec(html)) !== null) {
       const args = parseCallArgs(cm[1]);
-      const milesNum = args.length > 11 ? parseNumericArg(args[11]) : null;
-      const taxNum   = args.length > 5  ? parseNumericArg(args[5])  : null;
+      if (args.length < 12) continue;
+      const recId = parseInt(args[1], 10);
+      if (!Number.isFinite(recId)) continue;
+      const milesNum = parseNumericArg(args[11]);
+      const taxNum   = parseNumericArg(args[5]);
       const miles  = milesNum != null && Number.isInteger(milesNum) && milesNum > 0 ? milesNum : null;
       const taxUsd = taxNum  != null && taxNum  >= 0 ? Math.round(taxNum * 100) / 100 : null;
-      perFlightData.push({ miles, taxUsd });
+      recsByRecId.set(recId, { miles, taxUsd });
     }
-    let flightIndex = 0;
+
+    // Query each flight card's radio data-value in DOM order. This list lines
+    // up positionally with the bodyText "Flight" sections we'll iterate below.
+    const cardDataValues = Array.from(document.querySelectorAll('td.selectItineraryCheck'))
+      .map(td => {
+        const radio = td.querySelector('i[role="button"]');
+        if (!radio) return null;
+        const dv = parseInt(radio.getAttribute('data-value'), 10);
+        return Number.isFinite(dv) ? dv : null;
+      });
+    let cardIndex = 0;
 
     // Split by "Flight" prefix
     const sections = bodyText.split(/(?=Flight[A-Z]{2}\d)/);
@@ -572,15 +662,17 @@ async function parseFlightDetails(page, cabinName = 'Business') {
       const durationMatch = section.match(/Total travel time (\d+h\d+min)/);
       const duration = durationMatch ? durationMatch[1] : '';
 
-      // Per-flight miles + tax: the Nth flight section corresponds to the Nth
-      // addRecommendation() call parsed from the HTML above. If the mapping
-      // runs short (fewer JS calls than flight sections), the slot is null
-      // and the flight simply has no miles/tax data — display code handles
-      // that gracefully.
-      const rec = perFlightData[flightIndex] || { miles: null, taxUsd: null };
+      // Per-flight miles + tax: look up the addRecommendation entry whose
+      // recId equals this flight card's radio data-value. NEVER index by
+      // position — see the header comment for why sequential mapping pulls
+      // the wrong row for non-trivial display sorts.
+      const recId = cardDataValues[cardIndex];
+      cardIndex++;
+      const rec = (recId != null && recsByRecId.has(recId))
+        ? recsByRecId.get(recId)
+        : { miles: null, taxUsd: null };
       const miles = rec.miles;
       const taxUsd = rec.taxUsd;
-      flightIndex++;
 
       // Build descriptions
       let routeDesc = '';
@@ -641,6 +733,7 @@ module.exports = {
   // Pure helpers exposed for unit testing (same logic is inlined inside
   // parseFlightDetails' page.evaluate callback because browser context can't
   // import module exports — tests catch drift between the two copies).
+  extractRecommendationsByRecId, extractFlightCardDataValues, extractPerFlightByCard,
   extractPerFlightRecommendations, extractPerFlightMiles,
   parseCallArgs, parseMilesArg, parseNumericArg,
 };
