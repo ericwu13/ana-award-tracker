@@ -400,6 +400,89 @@ test('REGRESSION: trailing array arg does not throw off arg indexing', () => {
   ]);
 });
 
+test('REAL integration: TPE→SFO 2026-06-25 (captured live, mixed UA/NH)', () => {
+  // Live-captured HTML from a 2026-05-19 search for TPE→SFO 2026-06-25 economy.
+  // The page returns six itineraries with two distinct fare buckets:
+  //
+  //   serviceLevel 1400 (saver/standard partner award, "From 22,500 miles"):
+  //     [0] UA872 direct (UA, 12h00)             → 22,500 mi + $199.33
+  //     [1] UA852 direct (UA, 12h00)             → 22,500 mi + $199.33
+  //     [2] NH854+NH108 via HND (ANA, 14h45)     → 22,500 mi + $209.93
+  //     [3] NH852+NH108 via HND (ANA, 18h05)     → 22,500 mi + $209.93
+  //
+  //   serviceLevel 1200 (higher tier with HND→NRT self-arranged transfer,
+  //                      "From 30,000 miles"):
+  //     [4] NH854+NH008 via self-transfer (ANA)  → 30,000 mi + $174.43
+  //     [5] NH852+NH008 via self-transfer (ANA)  → 30,000 mi + $174.43
+  //
+  // This pins two facts the parser sometimes seems to "get wrong" but is
+  // actually getting right:
+  //   1. UA872 on this date IS 22,500 — that's what ANA's JS embeds. The
+  //      30,000 visible in the page header is the price of the *currently-
+  //      selected* itinerary (defaults to one of the self-transfer NH+NH008
+  //      slots [4]/[5] on first load), not UA872.
+  //   2. The carrier (UA vs NH) is not the discriminator — fare-bucket is.
+  //      Both UA-operated and NH-operated single-connection itineraries
+  //      price at the lower 22,500 tier; only the self-transfer routings
+  //      jump to 30,000.
+  //
+  // Fixture is gitignored (data/) so this test gracefully skips if absent.
+  // Recapture via: `node diag-tpe-sfo-live.js` from the parent project root.
+  const fs = require('fs');
+  const path = require('path');
+  let html;
+  try {
+    html = fs.readFileSync(path.join(__dirname, '..', 'data', 'flight-detail-tpe-sfo-2026-06-25.html'), 'utf8');
+  } catch {
+    console.log('    (live-capture fixture not present, skipping)');
+    return;
+  }
+  const recs = extractPerFlightRecommendations(html);
+  assert.strictEqual(recs.length, 6, 'should find 6 addRecommendation calls (matches 6 bodyText flight sections)');
+  assert.deepStrictEqual(recs, [
+    { miles: 22500, taxUsd: 199.33 }, // UA872
+    { miles: 22500, taxUsd: 199.33 }, // UA852
+    { miles: 22500, taxUsd: 209.93 }, // NH854+NH108
+    { miles: 22500, taxUsd: 209.93 }, // NH852+NH108
+    { miles: 30000, taxUsd: 174.43 }, // NH854+NH008 (self-transfer)
+    { miles: 30000, taxUsd: 174.43 }, // NH852+NH008 (self-transfer)
+  ]);
+
+  // The legacy extractor (addFormatedRecommendation arg 5) MUST return the
+  // same miles values — if these ever diverge, one of the parsers is wrong.
+  assert.deepStrictEqual(
+    extractPerFlightMiles(html),
+    [22500, 22500, 22500, 22500, 30000, 30000],
+    'legacy and structured extractors must agree on miles values'
+  );
+});
+
+test('REAL integration: SFO→TPE 2026-08-09 (captured live, EVA+UA+NH)', () => {
+  // Companion capture from the same diagnostic run, opposite direction. Pins
+  // a different carrier mix (BR / UA / NH) and a different price split
+  // (EVA at 39,500, UA + NH-self-transfer at 30,000) to ensure the
+  // sequential section→call mapping holds across multiple page layouts.
+  const fs = require('fs');
+  const path = require('path');
+  let html;
+  try {
+    html = fs.readFileSync(path.join(__dirname, '..', 'data', 'flight-detail-sfo-tpe-2026-08-09.html'), 'utf8');
+  } catch {
+    console.log('    (live-capture fixture not present, skipping)');
+    return;
+  }
+  const recs = extractPerFlightRecommendations(html);
+  assert.strictEqual(recs.length, 6);
+  assert.deepStrictEqual(recs, [
+    { miles: 39500, taxUsd: 313.2 }, // BR027
+    { miles: 39500, taxUsd: 313.2 }, // BR007
+    { miles: 30000, taxUsd: 239 },   // UA871
+    { miles: 30000, taxUsd: 239 },   // UA853
+    { miles: 30000, taxUsd: 279 },   // NH007+NH851 (self-transfer)
+    { miles: 30000, taxUsd: 279 },   // NH007+NH853 (self-transfer)
+  ]);
+});
+
 // ===========================================================================
 // Summary
 // ===========================================================================
