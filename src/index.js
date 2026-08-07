@@ -474,12 +474,15 @@ async function main() {
       skippedDetail = `\n⏭️ Skipped: ${sample}${skippedCount > 10 ? `, +${skippedCount - 10} more` : ''}`;
     }
 
-    const now = new Date().toLocaleString('en-US', { timeZone: 'America/Los_Angeles', hour: 'numeric', minute: '2-digit', hour12: true });
-    const headline = alertsSent > 0
-      ? `✅ ANA check @ ${now} — ${alertsSent} new alert(s)!`
-      : `🔍 ANA check @ ${now} — no changes`;
-    const statusMsg = `${headline}\nCoverage: ${coverageMsg}\nTracking: ${tracked} flights (${confirmed} confirmed, ${waitlisted} waitlist)${skippedDetail}`;
-    await sendStatusUpdate(statusMsg);
+    // Only announce cycles that actually found something. Quiet "no changes"
+    // cycles stay silent so the channel isn't pinged on every scrape — the
+    // per-flight "seat found" embeds are the only routine notification. Full
+    // coverage is still written to the console log above for debugging.
+    if (alertsSent > 0) {
+      const now = new Date().toLocaleString('en-US', { timeZone: 'America/Los_Angeles', hour: 'numeric', minute: '2-digit', hour12: true });
+      const statusMsg = `✅ ANA check @ ${now} — ${alertsSent} new alert(s)!\nCoverage: ${coverageMsg}\nTracking: ${tracked} flights (${confirmed} confirmed, ${waitlisted} waitlist)${skippedDetail}`;
+      await sendStatusUpdate(statusMsg);
+    }
   } catch (err) {
     console.error('[Main] Check failed:', err.message);
 
