@@ -27,6 +27,9 @@ const CABIN_KEYS = {
 // Used for stable sort in storage and deterministic display grouping.
 const CABIN_ORDER = ['premium-economy', 'economy', 'business'];
 
+const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const MONTHS_FULL = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+
 /**
  * Expand a month string (e.g., "2026-10") into dates covering the month.
  * Each date gets its own direct search (no calendar ±3 day view).
@@ -476,9 +479,77 @@ function getStatusSummary() {
  * Format the date for display: "2026-10-04" → "Oct 4 2026"
  */
 function shortDate(dateStr) {
-  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   const [y, m, d] = dateStr.split('-');
-  return `${months[parseInt(m) - 1]} ${parseInt(d)} ${y}`;
+  return `${MONTHS[parseInt(m) - 1]} ${parseInt(d)} ${y}`;
+}
+
+/**
+ * True if bIso is the calendar day immediately after aIso. Both are
+ * 'YYYY-MM-DD'. Uses UTC epoch days so month/year/DST boundaries are exact.
+ */
+function isNextDay(aIso, bIso) {
+  const [ay, am, ad] = aIso.split('-').map(Number);
+  const [by, bm, bd] = bIso.split('-').map(Number);
+  return Date.UTC(by, bm - 1, bd) - Date.UTC(ay, am - 1, ad) === 86400000;
+}
+
+/**
+ * Format one consecutive run [startIso..endIso] as a compact label.
+ * `includeYear` appends the year to single-year runs (callers suppress it
+ * when a shared year is printed once for the whole line). A run that itself
+ * spans two years always shows both years regardless of `includeYear`.
+ *   'Dec 23'..'Dec 26' → "Dec 23–26"      (same month)
+ *   'Dec 29'..'Dec 31' + 'Jan 1' → "Dec 29, 2026 – Jan 1, 2027"
+ */
+function formatRun(startIso, endIso, includeYear) {
+  const [sy, sm, sd] = startIso.split('-').map(Number);
+  const [ey, em, ed] = endIso.split('-').map(Number);
+  const sMon = MONTHS[sm - 1], eMon = MONTHS[em - 1];
+  const yr = y => (includeYear ? `, ${y}` : '');
+
+  if (startIso === endIso)    return `${sMon} ${sd}${yr(sy)}`;
+  if (sy === ey && sm === em) return `${sMon} ${sd}–${ed}${yr(sy)}`;
+  if (sy === ey)              return `${sMon} ${sd} – ${eMon} ${ed}${yr(sy)}`;
+  // Cross-year run: show both years only when the caller wants years at all
+  // (under a month/year header the years are redundant and Dec→Jan is obvious).
+  return includeYear
+    ? `${sMon} ${sd}, ${sy} – ${eMon} ${ed}, ${ey}`
+    : `${sMon} ${sd} – ${eMon} ${ed}`;
+}
+
+/**
+ * Collapse a list of ISO dates into a compact, human-readable string.
+ * Consecutive calendar days merge into ranges; the year is printed once at the
+ * end when every date shares it, otherwise per-run. Pass withYear=false to omit
+ * years entirely (used when a month/year header already supplies the context).
+ *   ['2026-12-23','2026-12-24','2026-12-25','2026-12-26'] → "Dec 23–26, 2026"
+ *   ['2026-12-15','2026-12-22','2026-12-29']              → "Dec 15, Dec 22, Dec 29, 2026"
+ *   ['2026-12-30','2026-12-31','2027-01-01']              → "Dec 30, 2026 – Jan 1, 2027"
+ *   (…, false)                                            → "Dec 30 – Jan 1"
+ */
+function formatDateRanges(isoDates, withYear = true) {
+  const sorted = [...new Set(isoDates)].sort();
+  if (sorted.length === 0) return '';
+
+  // Group into runs of consecutive calendar days.
+  const runs = [];
+  let start = sorted[0], prev = sorted[0];
+  for (let i = 1; i < sorted.length; i++) {
+    if (isNextDay(prev, sorted[i])) { prev = sorted[i]; }
+    else { runs.push([start, prev]); start = prev = sorted[i]; }
+  }
+  runs.push([start, prev]);
+
+  // Header/context supplies the year — render bare month+day runs.
+  if (!withYear) return runs.map(([s, e]) => formatRun(s, e, false)).join(', ');
+
+  // If every date shares one year, print it once at the end instead of per-run.
+  const years = new Set();
+  for (const [s, e] of runs) { years.add(s.slice(0, 4)); years.add(e.slice(0, 4)); }
+  const sharedYear = years.size === 1 ? [...years][0] : null;
+
+  const parts = runs.map(([s, e]) => formatRun(s, e, !sharedYear));
+  return sharedYear ? `${parts.join(', ')}, ${sharedYear}` : parts.join(', ');
 }
 
 /**
@@ -602,32 +673,65 @@ function formatFlights(from, to, dateInput, cabin) {
 }
 
 /**
- * Format the full /routes list for Discord. Dates within a route are grouped
- * by their cabin signature so routes with mixed per-date cabin sets render
- * legibly (e.g. "PE+Biz: May 1, May 8 / PE+Eco+Biz: Jul 5").
+ * Format the full /routes list for Discord as a chronological timeline.
+ *
+ * Rather than grouping by route, entries are ordered by date and sectioned
+ * under month headers, so the list answers "for this date, what routes am I
+ * tracking?" at a glance. Each entry is one (route × cabin-set) with its
+ * consecutive days collapsed into ranges:
+ *
+ *   DECEMBER 2026
+ *     Dec 6–13        SFO→TPE  Biz
+ *     Dec 15–19       SFO→TPE  PE · Eco · Biz
+ *     Dec 29 – Jan 1  HND→SFO  PE
  */
 function formatRoutes() {
   const routes = loadRoutes();
-  if (routes.length === 0) return 'No routes configured.';
 
-  const lines = ['📋 **Tracked Routes**', ''];
+  // Flatten routes into timeline entries: one per (route, cabin-set) group.
+  const entries = [];
+  let totalDates = 0;
   for (const r of routes) {
-    lines.push(`**${r.from}→${r.to}**`);
-    const groups = groupDatesByCabinSignature(r);
-    if (groups.length === 0) {
-      lines.push('  (no dates)');
-      continue;
-    }
-    for (const group of groups) {
-      const label = group.signature
-        .split('+')
-        .map(c => CABIN_KEYS[c] ? CABIN_KEYS[c].short : c)
-        .join('+');
-      const dateStr = group.dates.map(shortDate).join(', ');
-      lines.push(`  ${label}: ${dateStr}`);
+    if (r.dates && !Array.isArray(r.dates)) totalDates += Object.keys(r.dates).length;
+    for (const group of groupDatesByCabinSignature(r)) {
+      const start = group.dates[0]; // groups arrive date-sorted
+      entries.push({
+        start,
+        monthKey: start.slice(0, 7),
+        route: `${r.from}→${r.to}`,
+        dateLabel: formatDateRanges(group.dates, false), // month header carries the year
+        cabins: group.signature.split('+').map(c => (CABIN_KEYS[c] ? CABIN_KEYS[c].short : c)).join(' · '),
+      });
     }
   }
-  return lines.join('\n');
+
+  if (entries.length === 0) {
+    return '📋 **Tracked Routes**\n\nNothing tracked yet. Add one with `/track`.';
+  }
+
+  // Chronological, with route as a stable tiebreak for same-day starts.
+  entries.sort((a, b) => a.start.localeCompare(b.start) || a.route.localeCompare(b.route));
+
+  // Column widths for the monospace table.
+  const dateW = Math.max(...entries.map(e => e.dateLabel.length));
+  const routeW = Math.max(...entries.map(e => e.route.length));
+
+  const routeWord = routes.length === 1 ? 'route' : 'routes';
+  const dateWord = totalDates === 1 ? 'date' : 'dates';
+  const out = [`📋 **Tracked Routes** — ${routes.length} ${routeWord} · ${totalDates} ${dateWord}`, '```'];
+
+  let lastMonth = null;
+  for (const e of entries) {
+    if (e.monthKey !== lastMonth) {
+      if (lastMonth !== null) out.push('');
+      const [y, m] = e.monthKey.split('-').map(Number);
+      out.push(`${MONTHS_FULL[m - 1]} ${y}`.toUpperCase());
+      lastMonth = e.monthKey;
+    }
+    out.push(`  ${e.dateLabel.padEnd(dateW)}  ${e.route.padEnd(routeW)}  ${e.cabins}`);
+  }
+  out.push('```');
+  return out.join('\n');
 }
 
 /**
@@ -773,7 +877,7 @@ module.exports = {
   // Filesystem-aware public API
   loadRoutes, saveRoutes, seedRoutesIfNeeded,
   addRoute, removeRoute, syncState,
-  parseDateInput, expandMonth, expandDateRange, shortDate,
+  parseDateInput, expandMonth, expandDateRange, shortDate, formatDateRanges,
   getStatusSummary, formatStatus, formatRoutes, formatFlights,
   cleanupExpiredDates, todayPST, minBookableDate,
   // Pure helpers (exposed for unit testing and for index.js)

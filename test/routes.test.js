@@ -18,6 +18,7 @@ const {
   addDatesWithCabins,
   removeDatesFromRoute,
   groupDatesByCabinSignature,
+  formatDateRanges,
   CABIN_ORDER,
 } = require('../src/routes');
 
@@ -553,6 +554,83 @@ test("scenario: full lifecycle — build with migration, mutate, display", () =>
   const all = groups.find(g => g.signature === 'premium-economy+economy+business');
   assert.deepStrictEqual(peb.dates, ['2026-05-01', '2026-05-08', '2026-05-15']);
   assert.deepStrictEqual(all.dates.sort(), ['2026-07-05', '2026-09-07']);
+});
+
+// ===========================================================================
+section('formatDateRanges (compact date collapsing for /routes)');
+// ===========================================================================
+
+test('consecutive days collapse into a single range', () => {
+  assert.strictEqual(
+    formatDateRanges(['2026-12-06', '2026-12-07', '2026-12-08', '2026-12-09', '2026-12-10', '2026-12-11', '2026-12-12', '2026-12-13']),
+    'Dec 6–13, 2026',
+  );
+});
+
+test('single date shows month, day, year', () => {
+  assert.strictEqual(formatDateRanges(['2027-01-03']), 'Jan 3, 2027');
+});
+
+test('non-consecutive dates stay separate, year printed once', () => {
+  assert.strictEqual(
+    formatDateRanges(['2026-12-01', '2026-12-08', '2026-12-15', '2026-12-22', '2026-12-29']),
+    'Dec 1, Dec 8, Dec 15, Dec 22, Dec 29, 2026',
+  );
+});
+
+test('mixed runs and singletons in one string', () => {
+  assert.strictEqual(
+    formatDateRanges(['2026-12-01', '2026-12-08', '2026-12-15', '2026-12-16', '2026-12-17']),
+    'Dec 1, Dec 8, Dec 15–17, 2026',
+  );
+});
+
+test('consecutive run crossing a year boundary shows both years', () => {
+  assert.strictEqual(
+    formatDateRanges(['2026-12-29', '2026-12-30', '2026-12-31', '2027-01-01']),
+    'Dec 29, 2026 – Jan 1, 2027',
+  );
+});
+
+test('non-consecutive dates spanning two years annotate each', () => {
+  assert.strictEqual(
+    formatDateRanges(['2026-12-29', '2027-01-05']),
+    'Dec 29, 2026, Jan 5, 2027',
+  );
+});
+
+test('consecutive run crossing a month (same year) uses month–month form', () => {
+  assert.strictEqual(
+    formatDateRanges(['2026-11-30', '2026-12-01', '2026-12-02']),
+    'Nov 30 – Dec 2, 2026',
+  );
+});
+
+test('unsorted and duplicate input is normalized', () => {
+  assert.strictEqual(
+    formatDateRanges(['2026-12-08', '2026-12-06', '2026-12-07', '2026-12-06']),
+    'Dec 6–8, 2026',
+  );
+});
+
+test('empty input → empty string', () => {
+  assert.strictEqual(formatDateRanges([]), '');
+});
+
+test('run plus a later singleton in the same month (default withYear)', () => {
+  assert.strictEqual(formatDateRanges(['2026-12-06', '2026-12-07', '2026-12-13']), 'Dec 6–7, Dec 13, 2026');
+});
+
+test('withYear=false omits the year (month header supplies it)', () => {
+  assert.strictEqual(formatDateRanges(['2026-12-06', '2026-12-07', '2026-12-08'], false), 'Dec 6–8');
+  assert.strictEqual(formatDateRanges(['2027-01-03'], false), 'Jan 3');
+});
+
+test('withYear=false drops years even on a cross-year run', () => {
+  assert.strictEqual(
+    formatDateRanges(['2026-12-29', '2026-12-30', '2026-12-31', '2027-01-01'], false),
+    'Dec 29 – Jan 1',
+  );
 });
 
 // ===========================================================================
