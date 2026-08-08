@@ -558,41 +558,52 @@ function formatDateRanges(isoDates, withYear = true) {
  */
 function formatStatus() {
   const { lastCheck, summary } = getStatusSummary();
+  return renderStatus(lastCheck, summary);
+}
 
-  const lines = [];
+/**
+ * Pure renderer for /status — takes the timestamp + summary from
+ * getStatusSummary() and returns the Discord message. Split out from
+ * formatStatus so it can be unit-tested without touching the filesystem.
+ */
+function renderStatus(lastCheck, summary) {
   const lastCheckStr = lastCheck
     ? new Date(lastCheck).toLocaleString('en-US', { timeZone: 'America/Los_Angeles', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true })
-    : 'Never';
-  lines.push(`📊 **ANA Award Tracker** — Last check: ${lastCheckStr}`);
-  lines.push('');
-
-  for (const route of summary) {
-    lines.push(`**${route.route}**`);
-    lines.push('```');
-    lines.push('Date        PE   Eco  Biz');
-    lines.push('──────────────────────────');
-
-    for (const ds of route.dates) {
-      const dateLabel = shortDate(ds.date).padEnd(10);
-      if (ds.peCount === 0 && ds.ecoCount === 0 && ds.bizCount === 0) {
-        lines.push(`${dateLabel}  ❌    ❌    ❌`);
-      } else {
-        const pe  = ds.peCount  > 0 ? `${ds.peCount} ✅`  : ' ❌ ';
-        const eco = ds.ecoCount > 0 ? `${ds.ecoCount} ✅` : ' ❌ ';
-        const biz = ds.bizCount > 0 ? `${ds.bizCount} ✅` : ' ❌ ';
-        lines.push(`${dateLabel}${pe.padStart(5)} ${eco.padStart(5)} ${biz.padStart(5)}`);
-      }
-    }
-
-    lines.push('```');
-  }
+    : 'never';
+  const header = `📊 **ANA Award Tracker** · checked ${lastCheckStr}`;
 
   if (summary.length === 0) {
-    lines.push('No routes configured. Use `/track` to add routes.');
+    return `${header}\n\nNo routes configured. Use \`/track\` to add routes.`;
   }
 
-  lines.push('_Use `/flights <from> <to> <class> <date>` for details_');
-  return lines.join('\n');
+  const monthDay = (iso) => { const [, m, d] = iso.split('-'); return `${MONTHS[parseInt(m) - 1]} ${parseInt(d)}`; };
+  const CABINS = [['peCount', 'PE'], ['ecoCount', 'Eco'], ['bizCount', 'Biz']];
+  const hasSeats = (ds) => ds.peCount + ds.ecoCount + ds.bizCount > 0;
+
+  // "Bookable now" — only routes/dates with ≥1 confirmed seat. Each date lists
+  // the cabins available on it (e.g. "Dec 22 Eco×5"). Emoji live only in the
+  // section header, never in aligned columns, so nothing shifts.
+  const bookable = [];
+  for (const route of summary) {
+    const cells = route.dates
+      .filter(hasSeats)
+      .map(ds => `${monthDay(ds.date)} ${CABINS.filter(([k]) => ds[k] > 0).map(([k, label]) => `${label}×${ds[k]}`).join(' ')}`);
+    if (cells.length) bookable.push(`  ${route.route.padEnd(8)} ${cells.join(' · ')}`);
+  }
+
+  // Coverage tally — dates-with-seats / tracked, hottest routes first, 2 per row.
+  const cov = summary
+    .map(route => ({ label: route.route, withSeats: route.dates.filter(hasSeats).length, total: route.dates.length }))
+    .sort((a, b) => b.withSeats - a.withSeats || a.label.localeCompare(b.label))
+    .map(c => `${c.label.padEnd(8)}${`${c.withSeats}/${c.total}`.padEnd(6)}`);
+  const covRows = [];
+  for (let i = 0; i < cov.length; i += 2) covRows.push(('  ' + cov.slice(i, i + 2).join('  ')).trimEnd());
+
+  const body = ['```', '✅ BOOKABLE NOW'];
+  body.push(...(bookable.length ? bookable : ['  — none right now —']));
+  body.push('', 'COVERAGE  (dates with seats / tracked)', ...covRows, '```');
+
+  return [header, ...body, '_Use `/flights <from> <to> <class> <date>` for details_'].join('\n');
 }
 
 /**
@@ -878,7 +889,7 @@ module.exports = {
   loadRoutes, saveRoutes, seedRoutesIfNeeded,
   addRoute, removeRoute, syncState,
   parseDateInput, expandMonth, expandDateRange, shortDate, formatDateRanges,
-  getStatusSummary, formatStatus, formatRoutes, formatFlights,
+  getStatusSummary, formatStatus, renderStatus, formatRoutes, formatFlights,
   cleanupExpiredDates, todayPST, minBookableDate,
   // Pure helpers (exposed for unit testing and for index.js)
   expandCabinKeyword, sortCabinKeys, migrateRoute,

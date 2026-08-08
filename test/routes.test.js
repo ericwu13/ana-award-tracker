@@ -19,6 +19,7 @@ const {
   removeDatesFromRoute,
   groupDatesByCabinSignature,
   formatDateRanges,
+  renderStatus,
   CABIN_ORDER,
 } = require('../src/routes');
 
@@ -631,6 +632,48 @@ test('withYear=false drops years even on a cross-year run', () => {
     formatDateRanges(['2026-12-29', '2026-12-30', '2026-12-31', '2027-01-01'], false),
     'Dec 29 – Jan 1',
   );
+});
+
+// ===========================================================================
+section('renderStatus (/status layout)');
+// ===========================================================================
+
+const ds = (date, pe = 0, eco = 0, biz = 0) => ({ date, peCount: pe, ecoCount: eco, bizCount: biz });
+
+test('bookable section lists only dates with confirmed seats, cabins inline', () => {
+  const summary = [
+    { route: 'TPE→HND', dates: [ds('2026-12-22', 0, 5, 0), ds('2026-12-23'), ds('2026-12-24', 0, 1, 0), ds('2026-12-25'), ds('2026-12-26', 0, 0, 1)] },
+    { route: 'SFO→TPE', dates: [ds('2026-12-06'), ds('2026-12-07')] },
+  ];
+  const out = renderStatus('2026-08-08T19:52:00Z', summary);
+  assert.ok(out.includes('TPE→HND  Dec 22 Eco×5 · Dec 24 Eco×1 · Dec 26 Biz×1'), out);
+  assert.ok(!/SFO→TPE +Dec/.test(out), 'a route with no seats must not appear in the bookable list');
+});
+
+test('a date with multiple cabins lists them together', () => {
+  const out = renderStatus('2026-08-08T19:52:00Z', [{ route: 'TPE→HND', dates: [ds('2026-12-22', 2, 5, 1)] }]);
+  assert.ok(out.includes('Dec 22 PE×2 Eco×5 Biz×1'), out);
+});
+
+test('coverage tally sorts seats-first and counts dates-with-seats / total', () => {
+  const summary = [
+    { route: 'SFO→TPE', dates: [ds('2026-12-06'), ds('2026-12-07')] },       // 0/2
+    { route: 'TPE→HND', dates: [ds('2026-12-22', 0, 5, 0), ds('2026-12-23')] }, // 1/2
+  ];
+  const out = renderStatus('2026-08-08T19:52:00Z', summary);
+  assert.ok(out.includes('TPE→HND 1/2'), out);
+  assert.ok(out.includes('SFO→TPE 0/2'), out);
+  assert.ok(out.indexOf('TPE→HND 1/2') < out.indexOf('SFO→TPE 0/2'), 'hottest route should sort first');
+});
+
+test('no confirmed seats anywhere → placeholder, coverage still shown', () => {
+  const out = renderStatus('2026-08-08T19:52:00Z', [{ route: 'SFO→TPE', dates: [ds('2026-12-06')] }]);
+  assert.ok(out.includes('— none right now —'), out);
+  assert.ok(out.includes('SFO→TPE 0/1'), out);
+});
+
+test('empty summary → no-routes message', () => {
+  assert.ok(renderStatus(null, []).includes('No routes configured'));
 });
 
 // ===========================================================================
