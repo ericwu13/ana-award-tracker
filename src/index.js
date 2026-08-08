@@ -46,6 +46,40 @@ function saveState(state) {
 }
 
 /**
+ * Remove cached flights that are no longer worth keeping:
+ *  - orphaned: their (route, date) is no longer in the tracked routes, or
+ *  - stale: not seen in more than maxAgeDays — a backstop for combos that stop
+ *    being searched (e.g. perpetually rate-limited), which GONE detection can
+ *    never judge, so they'd otherwise linger forever.
+ * Mutates state.flights. Returns { orphaned, stale } counts. `now` is injectable
+ * for deterministic tests.
+ */
+function pruneStaleFlights(state, activeRoutes, { maxAgeDays = 30, now = Date.now() } = {}) {
+  const validRouteDates = new Set();
+  for (const route of activeRoutes) {
+    for (const date of Object.keys(route.dates || {})) {
+      validRouteDates.add(`${route.from}→${route.to}|${date}`);
+    }
+  }
+  const maxAgeMs = maxAgeDays * 24 * 60 * 60 * 1000;
+  let orphaned = 0, stale = 0;
+  for (const key of Object.keys(state.flights || {})) {
+    const [route, date] = key.split('|');
+    if (!validRouteDates.has(`${route}|${date}`)) {
+      delete state.flights[key];
+      orphaned++;
+      continue;
+    }
+    const seen = state.flights[key].lastSeen ? new Date(state.flights[key].lastSeen).getTime() : 0;
+    if (seen && (now - seen) > maxAgeMs) {
+      delete state.flights[key];
+      stale++;
+    }
+  }
+  return { orphaned, stale };
+}
+
+/**
  * Generate a stable unique key for a flight itinerary.
  */
 function flightKey(route, date, result) {
@@ -196,7 +230,7 @@ async function processOneResult({ route, cabin, date, results }, state) {
  * @param {Set} seenKeys — flight keys seen during this run (accumulated via onResult)
  */
 async function detectGoneFlights(allResults, state, seenKeys) {
-  const GONE_GRACE_MISSES = Math.max(1, parseInt(process.env.GONE_GRACE_MISSES || '2'));
+  const GONE_GRACE_MISSES = Math.max(1, parseInt(process.env.GONE_GRACE_MISSES || '3'));
   const searchedRouteDateCabin = new Set();
   for (const { route, cabin, date, results } of allResults) {
     if (results && results.length > 0 && !results[0]?._sessionFailed) {
@@ -440,30 +474,21 @@ async function main() {
     const validResults = allResults.filter(r => !r._sessionFailed);
     await detectGoneFlights(validResults, state, allSeenKeys);
 
+    // Prune orphaned (route/date no longer tracked) and stale (not seen in
+    // STALE_FLIGHT_DAYS) flights BEFORE saving so the cleanup persists. This
+    // ran AFTER saveState previously, so deletions were silently dropped on the
+    // next load and state.json grew unbounded (hundreds of dead entries).
+    const { orphaned, stale } = pruneStaleFlights(state, activeRoutes, {
+      maxAgeDays: parseInt(process.env.STALE_FLIGHT_DAYS || '30'),
+    });
+    if (orphaned > 0 || stale > 0) {
+      console.log(`[Main] Pruned ${orphaned} orphaned + ${stale} stale flight(s) from state`);
+    }
+
     state.lastCheck = new Date().toISOString();
     saveState(state);
 
-    // Summary
-    // Count only flights for currently-tracked routes/dates so this matches /status.
-    // Also opportunistically prune orphaned entries (routes/dates removed since last run).
-    const validRouteDates = new Set();
-    for (const route of activeRoutes) {
-      for (const date of Object.keys(route.dates || {})) {
-        validRouteDates.add(`${route.from}→${route.to}|${date}`);
-      }
-    }
-    let prunedOrphans = 0;
-    for (const key of Object.keys(state.flights)) {
-      const [route, date] = key.split('|');
-      if (!validRouteDates.has(`${route}|${date}`)) {
-        delete state.flights[key];
-        prunedOrphans++;
-      }
-    }
-    if (prunedOrphans > 0) {
-      console.log(`[Main] Pruned ${prunedOrphans} orphaned flight(s) from state`);
-    }
-
+    // Summary — counts reflect the pruned state so they match /status.
     const tracked = Object.keys(state.flights).length;
     const confirmed = Object.values(state.flights).filter(f => f.status === 'confirmed').length;
     const waitlisted = Object.values(state.flights).filter(f => f.status === 'waitlist').length;
@@ -527,7 +552,7 @@ async function main() {
 // ANA_INDEX_NOAUTORUN lets a test require this module without kicking off a
 // real search cycle. run-once.js requires this file WITHOUT that flag, so
 // production behaviour is unchanged.
-module.exports = { detectGoneFlights, processOneResult, flightKey, loadState, saveState };
+module.exports = { detectGoneFlights, processOneResult, flightKey, loadState, saveState, pruneStaleFlights };
 
 if (!process.env.ANA_INDEX_NOAUTORUN) {
   process.on('unhandledRejection', (err) => console.error('[Main] Unhandled rejection:', err));

@@ -80,6 +80,8 @@ Discord `/track` and `/untrack` also have an `until:` option for ranges.
 
 Notifications fire **immediately per-flight** via an `onResult` callback from `runParallel`, not batched after the full search. GONE detection (confirmed flight disappeared) runs post-batch since it requires complete search data.
 
+GONE detection uses a **miss grace period** (`GONE_GRACE_MISSES`): a flight is only removed after that many *consecutive* cycles where its combo was searched but the flight wasn't found. Without it, ANA's oscillating waitlist availability deletes a seat's state entry the instant it flickers out, so the seat re-alerts as brand-new when it returns — spamming the channel every cycle. State cleanup (`pruneStaleFlights`: orphaned + age-based) runs **before** `saveState` so deletions actually persist.
+
 ## Environment variables
 
 Key `.env` settings (see `docs/cookie-pipeline.md` for full list):
@@ -92,3 +94,5 @@ Key `.env` settings (see `docs/cookie-pipeline.md` for full list):
 - `SKIP_MIXED_CABIN=true` — filter mixed-cabin layovers
 - `MAX_LAYOVER_HOURS=30`
 - `ALERT_WAITLIST=true`
+- `GONE_GRACE_MISSES=3` — consecutive missed cycles before a flight is treated as gone and removed from state. Guards against ANA's waitlist availability oscillating on/off between cycles, which otherwise deletes + re-alerts the same seat as "new" every pull. Do not set to 1.
+- `STALE_FLIGHT_DAYS=30` — prune cached flights not seen in this many days (backstop for combos that stop being searched, e.g. perpetually rate-limited)
