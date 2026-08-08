@@ -184,14 +184,19 @@ async function processOneResult({ route, cabin, date, results }, state) {
 /**
  * GONE detection — runs AFTER all searches complete (cannot be streamed).
  *
- * When a (route, date, cabin) combo was searched AND a previously-confirmed
- * flight is no longer in the results, alert the user and remove from state.
+ * When a (route, date, cabin) combo was searched AND a previously-seen flight
+ * is no longer in the results, count it as a "miss". Only after GONE_GRACE_MISSES
+ * consecutive misses is the flight removed (and, if it was confirmed, alerted as
+ * gone). The grace period exists because ANA's waitlist availability oscillates
+ * between cycles — deleting on the first miss would drop the state entry and make
+ * the seat re-alert as brand-new the moment it flickers back, spamming the channel.
  *
  * @param {Array} allResults — full results array from runParallel
- * @param {Object} state — in-memory state (mutated: flights may be deleted)
+ * @param {Object} state — in-memory state (mutated: flight.missed / deletions)
  * @param {Set} seenKeys — flight keys seen during this run (accumulated via onResult)
  */
 async function detectGoneFlights(allResults, state, seenKeys) {
+  const GONE_GRACE_MISSES = Math.max(1, parseInt(process.env.GONE_GRACE_MISSES || '2'));
   const searchedRouteDateCabin = new Set();
   for (const { route, cabin, date, results } of allResults) {
     if (results && results.length > 0 && !results[0]?._sessionFailed) {
@@ -202,18 +207,30 @@ async function detectGoneFlights(allResults, state, seenKeys) {
   for (const [key, flight] of Object.entries(state.flights)) {
     if (!flight.searchedCabin) continue;
     const combo = `${flight.route}|${flight.date}|${flight.searchedCabin}`;
-    if (searchedRouteDateCabin.has(combo) && !seenKeys.has(key)) {
-      if (flight.status === 'confirmed') {
-        console.log(`[Main] ❌ GONE: ${flight.route} ${flight.date} ${flight.flightNumber} was confirmed, now unavailable`);
-        let costLine = '';
-        if (flight.miles) {
-          costLine = `\nWas: ${flight.miles.toLocaleString()} miles`;
-          if (flight.taxUsd != null) costLine += ` + $${flight.taxUsd.toFixed(2)}`;
-        }
-        await sendAlert(`❌ **Seats gone**: ${flight.flightNumber} ${flight.route} ${flight.date}\n${flight.cabinDesc || ''} — no longer available${costLine}`);
-      }
-      delete state.flights[key];
+    if (!searchedRouteDateCabin.has(combo)) continue; // combo not searched — can't judge
+
+    if (seenKeys.has(key)) {
+      if (flight.missed) flight.missed = 0; // present again — clear the miss streak
+      continue;
     }
+
+    // Searched but not found this cycle. Hold through brief flickers.
+    flight.missed = (flight.missed || 0) + 1;
+    if (flight.missed < GONE_GRACE_MISSES) {
+      console.log(`[Main] ⏳ ${flight.route} ${flight.date} ${flight.flightNumber} not found (miss ${flight.missed}/${GONE_GRACE_MISSES}) — holding`);
+      continue;
+    }
+
+    if (flight.status === 'confirmed') {
+      console.log(`[Main] ❌ GONE: ${flight.route} ${flight.date} ${flight.flightNumber} was confirmed, now unavailable`);
+      let costLine = '';
+      if (flight.miles) {
+        costLine = `\nWas: ${flight.miles.toLocaleString()} miles`;
+        if (flight.taxUsd != null) costLine += ` + $${flight.taxUsd.toFixed(2)}`;
+      }
+      await sendAlert(`❌ **Seats gone**: ${flight.flightNumber} ${flight.route} ${flight.date}\n${flight.cabinDesc || ''} — no longer available${costLine}`);
+    }
+    delete state.flights[key];
   }
 }
 
@@ -506,7 +523,15 @@ async function main() {
   }
 }
 
-process.on('unhandledRejection', (err) => console.error('[Main] Unhandled rejection:', err));
-process.on('uncaughtException', (err) => console.error('[Main] Uncaught exception:', err));
+// Exposed for unit testing (see test/gone-detection.test.js). Setting
+// ANA_INDEX_NOAUTORUN lets a test require this module without kicking off a
+// real search cycle. run-once.js requires this file WITHOUT that flag, so
+// production behaviour is unchanged.
+module.exports = { detectGoneFlights, processOneResult, flightKey, loadState, saveState };
 
-main();
+if (!process.env.ANA_INDEX_NOAUTORUN) {
+  process.on('unhandledRejection', (err) => console.error('[Main] Unhandled rejection:', err));
+  process.on('uncaughtException', (err) => console.error('[Main] Uncaught exception:', err));
+
+  main();
+}
