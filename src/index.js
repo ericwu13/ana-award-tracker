@@ -546,7 +546,7 @@ async function main() {
     // All sessions have had their browser.close() by now (runParallel's finally).
     // Kill anything of ours that survived it (ownerPid = us) plus orphans from
     // earlier dead cycles, so no bot Chrome outlives this run.
-    try { cleanupChrome({ ownerPid: process.pid, log: msg => console.log(`[Main] ${msg}`) }); } catch {}
+    try { await cleanupChrome({ ownerPid: process.pid, log: msg => console.log(`[Main] ${msg}`) }); } catch {}
     await destroyDiscord();
     console.log(`[Main] === Run finished ${new Date().toISOString()} exitCode=${process.exitCode || 0} ===\n`);
     process.exit(process.exitCode || 0);

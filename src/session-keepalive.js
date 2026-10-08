@@ -234,7 +234,7 @@ async function refreshSession() {
     // Kill any Chrome this process launched that browser.close() failed to end
     // (ownerPid = us — keep-alive is the only browser this process ever opens),
     // plus orphans left by dead run-once.js cycles.
-    try { cleanupChrome({ ownerPid: process.pid, log: msg => console.log(`[KeepAlive] ${msg}`) }); } catch {}
+    try { await cleanupChrome({ ownerPid: process.pid, log: msg => console.log(`[KeepAlive] ${msg}`) }); } catch {}
   }
 }
 

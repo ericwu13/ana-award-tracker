@@ -12,9 +12,9 @@ startCookieServer();
 // Seed routes.json from .env if first run
 seedRoutesIfNeeded();
 
-/** Kill Chrome instances the (now-exited) search child left behind. */
+/** Kill Chrome instances the (now-exited) search child left behind. Fire-and-forget. */
 function cleanupChrome() {
-  try { cleanupBotChrome({ log: msg => console.log(`[Runner] ${msg}`) }); } catch (e) {}
+  cleanupBotChrome({ log: msg => console.log(`[Runner] ${msg}`) }).catch(() => {});
 }
 
 /**
