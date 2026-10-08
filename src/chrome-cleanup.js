@@ -59,7 +59,7 @@ function profileDirOf(commandLine) {
 }
 
 function normDir(d) {
-  return d.replace(/[\\/]+$/, '').toLowerCase();
+  return d.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
 }
 
 /**
@@ -84,7 +84,7 @@ function classifyChrome(processes, { ownerPid = null, all = false, tmpDir = null
     const dir = profileDirOf(p.cmd);
     if (!dir) continue;
     const key = normDir(dir);
-    if (tmpPrefix && !key.replace(/\//g, '\\').startsWith(tmpPrefix)) continue;
+    if (tmpPrefix && !key.startsWith(tmpPrefix)) continue;
     if (!groups.has(key)) groups.set(key, { profileDir: dir, main: null, members: [] });
     const g = groups.get(key);
     g.members.push(p);
@@ -121,12 +121,19 @@ function classifyChrome(processes, { ownerPid = null, all = false, tmpDir = null
   return { kill, keep };
 }
 
+/** Absolute path to Windows PowerShell, so a broken PATH can't silently disable cleanup. */
+function powershellPath() {
+  const sys = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  try { if (fs.existsSync(sys)) return sys; } catch {}
+  return 'powershell.exe';
+}
+
 /** Run a PowerShell script via -EncodedCommand (no shell, no quoting). */
 function runPowerShell(script, { timeout = PS_TIMEOUT_MS } = {}) {
   return new Promise((resolve, reject) => {
     const encoded = Buffer.from(script, 'utf16le').toString('base64');
     execFile(
-      'powershell.exe',
+      powershellPath(),
       ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded],
       { timeout, windowsHide: true, maxBuffer: 16 * 1024 * 1024, encoding: 'utf8' },
       (err, stdout) => (err ? reject(err) : resolve(stdout))
@@ -150,12 +157,17 @@ async function listProcesses() {
     const out = (await runPowerShell(script)).trim();
     const parsed = JSON.parse(out);
     if (!parsed || parsed.ok !== true || !Array.isArray(parsed.procs)) return null;
-    return parsed.procs.map(r => ({
+    const procs = parsed.procs.filter(Boolean).map(r => ({
       pid: Number(r.ProcessId),
       ppid: Number(r.ParentProcessId),
       name: String(r.Name || ''),
       cmd: String(r.CommandLine || ''),
     }));
+    // Sanity invariant: the calling process must itself be in the listing as
+    // node.exe. If it isn't, the WMI answer is incomplete or our "parent is
+    // node.exe" assumption doesn't hold on this host — treat as untrusted.
+    if (!procs.some(p => p.pid === process.pid && /^node\.exe$/i.test(p.name))) return null;
+    return procs;
   } catch {
     return null;
   }
@@ -179,7 +191,7 @@ async function killBotChrome(pids) {
 /** Remove a lighthouse temp profile dir under tmpDir. Best-effort. */
 function removeProfileDir(dir, tmpDir) {
   try {
-    const key = normDir(dir).replace(/\//g, '\\');
+    const key = normDir(dir);
     if (!key.startsWith(normDir(tmpDir) + '\\')) return;
     if (/\\lighthouse\.\d+$/i.test(key) && fs.existsSync(dir)) {
       fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 });

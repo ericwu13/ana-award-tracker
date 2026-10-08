@@ -136,6 +136,14 @@ test('ignores lighthouse profiles outside tmpDir', () => {
   assert.deepStrictEqual(keep, []);
 });
 
+test('tmpDir gate tolerates forward slashes and trailing separators', () => {
+  const procs = [node(500), botMain(600, 500, 1, 'C:/Users/eric8/AppData/Local/Temp')];
+  const { keep } = classifyChrome(procs, { tmpDir: TMP + '\\' });
+  assert.deepStrictEqual(keep.map(k => k.pid), [600]);
+  const { keep: keep2 } = classifyChrome([node(500), botMain(600, 500, 1)], { tmpDir: 'C:/Users/eric8/AppData/Local/Temp/' });
+  assert.deepStrictEqual(keep2.map(k => k.pid), [600]);
+});
+
 test('groups by profile dir case-insensitively', () => {
   const a = botMain(600, 1, 7);
   const b = botChild(601, 600, 7, 'renderer');
