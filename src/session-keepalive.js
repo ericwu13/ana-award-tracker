@@ -60,15 +60,11 @@ async function refreshSession() {
       headless: false,
       turnstile: true,
       disableXvfb: true,
-      args: [
-        '--start-minimized',
-        '--window-position=-2560,679',
-        '--window-size=800,600',
-        // Must live in `args`: chrome-launcher only reads `chromeFlags`, and passing
-        // `chromeFlags` via customConfig would replace the anti-detection defaults.
-        '--disable-backgrounding-occluded-windows',
-      ],
-      customConfig: { chromePath },
+      args: ['--start-minimized', '--window-position=-2560,679', '--window-size=800,600'],
+      customConfig: {
+        chromePath,
+        chromiumFlags: ['--disable-backgrounding-occluded-windows'],
+      },
       connectOption: {
         // Cap CDP at 90s so wedged renderers fail fast; keep-alive runs every 25 min so a quick failure is recoverable.
         protocolTimeout: 90000,

@@ -35,9 +35,7 @@ No test framework — uses built-in `assert`. Exits with code 1 on failure.
 ANA uses Akamai Bot Manager. The "heavy traffic" / "request cannot be accepted" page is bot detection, NOT rate limiting. Automated login via puppeteer is blocked. Login must happen in the user's real Chrome browser. The bot only uses puppeteer for searches (less aggressively blocked).
 
 ### Orphaned Chrome cleanup
-`puppeteer-real-browser` launches Chrome via `chrome-launcher`, whose profile dir is `%TEMP%\lighthouse.<random>` — the word "puppeteer" is **never** on the command line, so don't match on it. `src/chrome-cleanup.js` identifies bot browsers by the `lighthouse.` profile and kills them when their parent `node.exe` is dead (orphan) or when `ownerPid` is the caller (its own leftovers after `browser.close()`). It runs in `index.js` `finally`, the keep-alive `finally`, and `start.js` child exit. Manual: `node cleanup-chrome.js [--all|--list]`. The user's real Chrome has no lighthouse profile and is never touched.
-
-`--disable-backgrounding-occluded-windows` must go in `args`, not `customConfig.chromiumFlags` (chrome-launcher ignores that key, and `customConfig.chromeFlags` would replace the anti-detection defaults).
+`puppeteer-real-browser` launches Chrome via `chrome-launcher`, whose profile dir is `%TEMP%\lighthouse.<random>` — the word "puppeteer" is **never** on the command line, so don't match on it. `src/chrome-cleanup.js` identifies bot browsers by the `lighthouse.` profile and kills them when their parent `node.exe` is dead (orphan) or when `ownerPid` is the caller (its own leftovers after `browser.close()`). It runs in `index.js` `finally`, the keep-alive `finally`, and `start.js` child exit. Manual: `node cleanup-chrome.js [--all|--list]`. The user's real Chrome has no lighthouse profile and is never touched. Stale `%TEMP%\lighthouse.*` dirs are only swept once they are >10 min old, because chrome-launcher creates the dir shortly before Chrome shows up in the process list.
 
 ### Cookie pipeline health checks
 Do NOT trust these as proof cookies are valid:

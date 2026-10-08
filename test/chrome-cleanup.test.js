@@ -43,6 +43,16 @@ test('null/empty command line', () => {
   assert.strictEqual(profileDirOf(null), null);
   assert.strictEqual(profileDirOf(''), null);
 });
+test('crashpad handler references the profile via --database, not --user-data-dir', () => {
+  const cmd = `${CHROME} --type=crashpad-handler "--user-data-dir=${TMP}\\lighthouse.555" /prefetch:4 --database=${TMP}\\lighthouse.555\\Crashpad --url=https://clients2.google.com/cr/report`;
+  assert.strictEqual(profileDirOf(cmd), `${TMP}\\lighthouse.555`);
+  const cmd2 = `${CHROME} --type=crashpad-handler --database=${TMP}\\lighthouse.555\\Crashpad`;
+  assert.strictEqual(profileDirOf(cmd2), `${TMP}\\lighthouse.555`);
+});
+test('does not match lighthouse-like text that is not a chrome-launcher profile', () => {
+  assert.strictEqual(profileDirOf(`${CHROME} --user-data-dir=C:\\proj\\lighthouse.config\\x`), null);
+  assert.strictEqual(profileDirOf(`${CHROME} https://lighthouse.example.com/lighthouse.html`), null);
+});
 
 console.log('classifyChrome');
 test('never touches the user\'s own Chrome', () => {
@@ -107,6 +117,13 @@ test('groups by profile dir case-insensitively', () => {
   const { kill } = classifyChrome([a, b]);
   assert.deepStrictEqual(kill.map(k => k.pid).sort(), [600, 601]);
   assert.strictEqual(new Set(kill.map(k => k.profileDir)).size, 1);
+});
+
+test('crashpad helper is killed together with its orphaned browser', () => {
+  const crashpad = { pid: 603, ppid: 600, name: 'chrome.exe', cmd: `${CHROME} --type=crashpad-handler --database=${TMP}\\lighthouse.1\\Crashpad` };
+  const procs = [botMain(600, 500, 1), botChild(601, 600, 1, 'renderer'), crashpad];
+  const { kill } = classifyChrome(procs);
+  assert.deepStrictEqual(kill.map(k => k.pid).sort(), [600, 601, 603]);
 });
 
 test('mixed machine state: user chrome + live bot + orphan bot', () => {

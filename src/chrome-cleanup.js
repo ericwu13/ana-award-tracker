@@ -31,14 +31,20 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const PROFILE_RE = /--user-data-dir=(?:"([^"]*lighthouse\.[^"]*)"|(\S*lighthouse\.\S*))/i;
+// chrome-launcher profile dirs look like `<tmp>\lighthouse.12345678`. Match the
+// path up to and including that segment, quoted or not. We don't anchor on
+// `--user-data-dir=` because helper processes (e.g. `--type=crashpad-handler
+// --database=<profile>\Crashpad`) reference the dir through other switches.
+// Both forms must start at a drive letter so the closing quote of the chrome.exe
+// path can't be mistaken for the start of a quoted argument.
+const PROFILE_RE = /(?:"([A-Za-z]:[^"]*?[\\/]lighthouse\.\d+)(?=[\\/"])|(?:^|[\s=])([A-Za-z]:[^"\s]*?[\\/]lighthouse\.\d+)(?=[\\/"\s]|$))/i;
 
 /** Extract the lighthouse profile dir from a Chrome command line, or null. */
 function profileDirOf(commandLine) {
   if (!commandLine) return null;
   const m = PROFILE_RE.exec(commandLine);
   if (!m) return null;
-  return (m[1] || m[2]).replace(/[\\/]+$/, '');
+  return m[1] || m[2];
 }
 
 /**
@@ -131,25 +137,33 @@ function killPids(pids) {
 /** Remove a lighthouse temp profile dir. Best-effort. */
 function removeProfileDir(dir) {
   try {
-    if (/lighthouse\./i.test(dir) && fs.existsSync(dir)) {
+    if (/[\\/]lighthouse\.\d+$/i.test(dir) && fs.existsSync(dir)) {
       fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
     }
   } catch {}
 }
 
+// A profile dir younger than this is left alone even if no chrome.exe references
+// it yet: chrome-launcher mkdirs the profile a moment before spawning Chrome, and
+// another process (keep-alive vs run-once) could sweep in that window.
+const SWEEP_MIN_AGE_MS = 10 * 60 * 1000;
+
 /**
  * Sweep leftover %TEMP%\lighthouse.* dirs that no running Chrome uses.
  * Each one is ~100-300 MB of cache; chrome-launcher only deletes them on a clean kill().
  */
-function sweepStaleProfileDirs(liveDirs) {
+function sweepStaleProfileDirs(liveDirs, now = Date.now()) {
   const live = new Set(liveDirs.map(d => d.toLowerCase()));
   let removed = 0;
   try {
     const tmp = os.tmpdir();
     for (const name of fs.readdirSync(tmp)) {
-      if (!/^lighthouse\./i.test(name)) continue;
+      if (!/^lighthouse\.\d+$/i.test(name)) continue;
       const full = path.join(tmp, name);
       if (live.has(full.toLowerCase())) continue;
+      try {
+        if (now - fs.statSync(full).mtimeMs < SWEEP_MIN_AGE_MS) continue;
+      } catch { continue; }
       try {
         fs.rmSync(full, { recursive: true, force: true, maxRetries: 3 });
         removed++;
