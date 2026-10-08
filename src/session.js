@@ -61,6 +61,9 @@ class Session {
       '--start-minimized',
       `--window-position=${-1920 + this.id * 320},679`,
       '--window-size=1280,900',
+      // Must live in `args`: chrome-launcher only reads `chromeFlags`, and passing
+      // `chromeFlags` via customConfig would replace the anti-detection defaults.
+      '--disable-backgrounding-occluded-windows',
     ];
 
     this.log('Launching browser...');
@@ -69,10 +72,7 @@ class Session {
       turnstile: true,
       disableXvfb: true,
       args,
-      customConfig: {
-        chromePath,
-        chromiumFlags: ['--disable-backgrounding-occluded-windows'],
-      },
+      customConfig: { chromePath },
       connectOption: {
         // Cap CDP at 90s so wedged renderers fail fast and the outer loop can recover.
         // Healthy searchDate() calls finish well under 60s; 90s gives headroom for occasional Akamai sensor stalls.

@@ -3,6 +3,7 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const { runParallel } = require('./session');
+const { cleanupChrome } = require('./chrome-cleanup');
 const { initDiscord, destroyDiscord, notifyAvailability, sendAlert, sendStatusUpdate } = require('./notifier');
 
 const { ANA_USERNAME, ANA_PASSWORD } = process.env;
@@ -542,6 +543,10 @@ async function main() {
       saveState(state);
     }
   } finally {
+    // All sessions have had their browser.close() by now (runParallel's finally).
+    // Kill anything of ours that survived it (ownerPid = us) plus orphans from
+    // earlier dead cycles, so no bot Chrome outlives this run.
+    try { cleanupChrome({ ownerPid: process.pid, log: msg => console.log(`[Main] ${msg}`) }); } catch {}
     await destroyDiscord();
     console.log(`[Main] === Run finished ${new Date().toISOString()} exitCode=${process.exitCode || 0} ===\n`);
     process.exit(process.exitCode || 0);

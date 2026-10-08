@@ -102,6 +102,9 @@ async function getBrowser() {
     '--start-minimized',
     '--window-position=-1920,679',
     '--window-size=1280,900',
+    // Must live in `args`: chrome-launcher only reads `chromeFlags`, and passing
+    // `chromeFlags` via customConfig would replace the anti-detection defaults.
+    '--disable-backgrounding-occluded-windows',
   ];
 
   // Use the user's real Chrome profile if configured — inherits cookies, session, fingerprint
@@ -118,10 +121,7 @@ async function getBrowser() {
     turnstile: true,
     disableXvfb: true,
     args,
-    customConfig: {
-      chromePath,
-      chromiumFlags: ['--disable-backgrounding-occluded-windows'],
-    },
+    customConfig: { chromePath },
     connectOption: {
       // Akamai sensor JS can block the renderer event loop under load; 180s default is too tight
       protocolTimeout: 300000,

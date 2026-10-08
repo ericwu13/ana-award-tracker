@@ -1,9 +1,10 @@
-const { spawn, execSync } = require('child_process');
+const { spawn } = require('child_process');
 require('dotenv').config();
 const { Client, GatewayIntentBits } = require('discord.js');
 const { startCookieServer } = require('./src/cookie-server');
 const { registerCommands, handleCommand } = require('./src/discord-commands');
 const { seedRoutesIfNeeded } = require('./src/routes');
+const { cleanupChrome: cleanupBotChrome } = require('./src/chrome-cleanup');
 
 // Start the cookie receiver server — Chrome extension pushes fresh cookies here
 startCookieServer();
@@ -11,21 +12,9 @@ startCookieServer();
 // Seed routes.json from .env if first run
 seedRoutesIfNeeded();
 
-/** Kill orphaned Chrome processes spawned by puppeteer */
+/** Kill Chrome instances the (now-exited) search child left behind. */
 function cleanupChrome() {
-  try {
-    const out = execSync(
-      'powershell -Command "Get-CimInstance Win32_Process -Filter \\"Name=\'chrome.exe\'\\" | Where-Object { $_.CommandLine -match \'puppeteer\' } | Select-Object -ExpandProperty ProcessId"',
-      { encoding: 'utf8', timeout: 10000, windowsHide: true }
-    ).trim();
-    if (out) {
-      const pids = out.split(/\r?\n/).map(p => p.trim()).filter(Boolean);
-      if (pids.length > 0) {
-        console.log(`[Runner] Cleaning up ${pids.length} orphaned Chrome process(es)`);
-        execSync(`powershell -Command "Stop-Process -Id ${pids.join(',')} -Force -ErrorAction SilentlyContinue"`, { timeout: 10000, windowsHide: true });
-      }
-    }
-  } catch (e) {}
+  try { cleanupBotChrome({ log: msg => console.log(`[Runner] ${msg}`) }); } catch (e) {}
 }
 
 /**

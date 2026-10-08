@@ -12,8 +12,10 @@ The Chrome extension (`cookie-exporter/`) auto-pushes cookies every 5-10 min fro
 ## Running tests
 
 ```bash
-node test/routes.test.js    # 55 tests — routes data model, per-date cabins, date parsing
-node test/parser.test.js    # 27 tests — per-flight miles extraction from ANA HTML
+node test/routes.test.js          # routes data model, per-date cabins, date parsing
+node test/parser.test.js          # per-flight miles extraction from ANA HTML
+node test/gone-detection.test.js  # GONE grace period
+node test/chrome-cleanup.test.js  # orphaned bot-Chrome classification
 ```
 
 No test framework — uses built-in `assert`. Exits with code 1 on failure.
@@ -31,6 +33,11 @@ No test framework — uses built-in `assert`. Exits with code 1 on failure.
 
 ### Akamai bot detection
 ANA uses Akamai Bot Manager. The "heavy traffic" / "request cannot be accepted" page is bot detection, NOT rate limiting. Automated login via puppeteer is blocked. Login must happen in the user's real Chrome browser. The bot only uses puppeteer for searches (less aggressively blocked).
+
+### Orphaned Chrome cleanup
+`puppeteer-real-browser` launches Chrome via `chrome-launcher`, whose profile dir is `%TEMP%\lighthouse.<random>` — the word "puppeteer" is **never** on the command line, so don't match on it. `src/chrome-cleanup.js` identifies bot browsers by the `lighthouse.` profile and kills them when their parent `node.exe` is dead (orphan) or when `ownerPid` is the caller (its own leftovers after `browser.close()`). It runs in `index.js` `finally`, the keep-alive `finally`, and `start.js` child exit. Manual: `node cleanup-chrome.js [--all|--list]`. The user's real Chrome has no lighthouse profile and is never touched.
+
+`--disable-backgrounding-occluded-windows` must go in `args`, not `customConfig.chromiumFlags` (chrome-launcher ignores that key, and `customConfig.chromeFlags` would replace the anti-detection defaults).
 
 ### Cookie pipeline health checks
 Do NOT trust these as proof cookies are valid:
