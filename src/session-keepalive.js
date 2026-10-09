@@ -16,6 +16,7 @@ const fs = require('fs');
 const path = require('path');
 
 const { isStale, markStale } = require('./session-stale');
+const { cleanupChrome } = require('./chrome-cleanup');
 const COOKIE_PATH = path.join(__dirname, '..', 'data', 'cookies.json');
 const KEEPALIVE_INTERVAL_MS = 25 * 60 * 1000; // Every 25 minutes
 const STALE_THRESHOLD_MS = 2 * 60 * 60 * 1000; // Alert if >2 hours without refresh
@@ -230,14 +231,10 @@ async function refreshSession() {
     if (browser) {
       try { await browser.close(); } catch {}
     }
-    // Clean up orphaned chrome from puppeteer
-    try {
-      const { execSync } = require('child_process');
-      execSync(
-        'powershell -Command "Get-CimInstance Win32_Process -Filter \\"Name=\'chrome.exe\'\\" | Where-Object { $_.CommandLine -match \'puppeteer\' } | Select-Object -ExpandProperty ProcessId | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }"',
-        { timeout: 10000, windowsHide: true, stdio: 'ignore' }
-      );
-    } catch {}
+    // Kill any Chrome this process launched that browser.close() failed to end
+    // (ownerPid = us — keep-alive is the only browser this process ever opens),
+    // plus orphans left by dead run-once.js cycles.
+    try { await cleanupChrome({ ownerPid: process.pid, log: msg => console.log(`[KeepAlive] ${msg}`) }); } catch {}
   }
 }
 

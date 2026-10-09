@@ -12,8 +12,10 @@ The Chrome extension (`cookie-exporter/`) auto-pushes cookies every 5-10 min fro
 ## Running tests
 
 ```bash
-node test/routes.test.js    # 55 tests — routes data model, per-date cabins, date parsing
-node test/parser.test.js    # 27 tests — per-flight miles extraction from ANA HTML
+node test/routes.test.js          # routes data model, per-date cabins, date parsing
+node test/parser.test.js          # per-flight miles extraction from ANA HTML
+node test/gone-detection.test.js  # GONE grace period
+node test/chrome-cleanup.test.js  # orphaned bot-Chrome classification
 ```
 
 No test framework — uses built-in `assert`. Exits with code 1 on failure.
@@ -31,6 +33,11 @@ No test framework — uses built-in `assert`. Exits with code 1 on failure.
 
 ### Akamai bot detection
 ANA uses Akamai Bot Manager. The "heavy traffic" / "request cannot be accepted" page is bot detection, NOT rate limiting. Automated login via puppeteer is blocked. Login must happen in the user's real Chrome browser. The bot only uses puppeteer for searches (less aggressively blocked).
+
+### Orphaned Chrome cleanup
+`puppeteer-real-browser` launches Chrome via `chrome-launcher`, whose profile dir is `%TEMP%\lighthouse.<random>` — the word "puppeteer" is **never** on the command line, so don't match on it. On a *healthy* `browser.close()`, puppeteer-real-browser's `disconnected` hook already runs chrome-launcher's `kill()` and deletes the temp profile; the leak only happens when that hook never fires (CDP `Browser.close` timeout, crash, Task Scheduler kill). `src/chrome-cleanup.js` is the backstop: it identifies bot browsers by a `--user-data-dir`/`--database` pointing at `%TEMP%\lighthouse.<n>` and kills them when their parent `node.exe` is dead (orphan) or when `ownerPid` is the caller (its own leftovers, called after `browser.close()` was attempted). It runs (async) in `index.js` `finally`, the keep-alive `finally`, and `start.js` child exit. Manual: `node cleanup-chrome.js [--all|--list]`. The user's real Chrome has no lighthouse profile and is never touched.
+
+Safety rules baked in — keep them: if the PowerShell listing fails, nothing is killed or swept (an empty list ≠ no bot browsers); the kill pipeline re-checks name + command line so a reused pid can't be hit; helpers whose browser pid is still alive are never killed even if its command line is unreadable; stale `%TEMP%\lighthouse.*` dirs are only swept once >10 min old (chrome-launcher mkdirs before Chrome shows up in the process list). `--disable-backgrounding-occluded-windows` is already in chrome-launcher's DEFAULT_FLAGS; `customConfig.chromiumFlags` is ignored by chrome-launcher, and `customConfig.chromeFlags` would *replace* the whole flag list — don't use either.
 
 ### Cookie pipeline health checks
 Do NOT trust these as proof cookies are valid:
