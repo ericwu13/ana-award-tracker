@@ -6,6 +6,7 @@ const { connect } = require('puppeteer-real-browser');
 const fs = require('fs');
 const path = require('path');
 const { parseResults, parseFlightDetails, getPageDebugInfo } = require('./parser');
+const { windowPositionArg } = require('./browser-window');
 
 const COOKIE_PATH = path.join(__dirname, '..', 'data', 'cookies.json');
 
@@ -58,8 +59,9 @@ class Session {
   async launch() {
     const chromePath = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
     const args = [
-      '--start-minimized',
-      `--window-position=${-1920 + this.id * 320},679`,
+      // Off-screen placement (BOT_WINDOW_POSITION). `--start-minimized` used to be
+      // here too, but it is not a Chrome switch and was ignored.
+      windowPositionArg('search', { id: this.id, log: msg => this.log(msg) }),
       '--window-size=1280,900',
     ];
 

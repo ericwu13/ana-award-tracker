@@ -16,6 +16,7 @@ node test/routes.test.js          # routes data model, per-date cabins, date par
 node test/parser.test.js          # per-flight miles extraction from ANA HTML
 node test/gone-detection.test.js  # GONE grace period
 node test/chrome-cleanup.test.js  # orphaned bot-Chrome classification
+node test/browser-window.test.js  # BOT_WINDOW_POSITION resolution
 ```
 
 No test framework — uses built-in `assert`. Exits with code 1 on failure.
@@ -38,6 +39,14 @@ ANA uses Akamai Bot Manager. The "heavy traffic" / "request cannot be accepted" 
 `puppeteer-real-browser` launches Chrome via `chrome-launcher`, whose profile dir is `%TEMP%\lighthouse.<random>` — the word "puppeteer" is **never** on the command line, so don't match on it. On a *healthy* `browser.close()`, puppeteer-real-browser's `disconnected` hook already runs chrome-launcher's `kill()` and deletes the temp profile; the leak only happens when that hook never fires (CDP `Browser.close` timeout, crash, Task Scheduler kill). `src/chrome-cleanup.js` is the backstop: it identifies bot browsers by a `--user-data-dir`/`--database` pointing at `%TEMP%\lighthouse.<n>` and kills them when their parent `node.exe` is dead (orphan) or when `ownerPid` is the caller (its own leftovers, called after `browser.close()` was attempted). It runs (async) in `index.js` `finally`, the keep-alive `finally`, and `start.js` child exit. Manual: `node cleanup-chrome.js [--all|--list]`. The user's real Chrome has no lighthouse profile and is never touched.
 
 Safety rules baked in — keep them: if the PowerShell listing fails, nothing is killed or swept (an empty list ≠ no bot browsers); the kill pipeline re-checks name + command line so a reused pid can't be hit; helpers whose browser pid is still alive are never killed even if its command line is unreadable; stale `%TEMP%\lighthouse.*` dirs are only swept once >10 min old (chrome-launcher mkdirs before Chrome shows up in the process list). `--disable-backgrounding-occluded-windows` is already in chrome-launcher's DEFAULT_FLAGS; `customConfig.chromiumFlags` is ignored by chrome-launcher, and `customConfig.chromeFlags` would *replace* the whole flag list — don't use either.
+
+### Hiding bot windows
+Three things that do NOT work, with the reason, so nobody retries them:
+- **Headless / non-interactive session** (Task Scheduler "run whether user is logged on or not"): Akamai fingerprints the WebGL renderer and screen metrics; the cookies come from the user's real Chrome on the same GPU, so a SwiftShader renderer is a mismatch.
+- **Minimizing** (CDP `Browser.setWindowBounds windowState=minimized`): on Windows a minimized window is HIDDEN to the renderer and BeginMainFrame stops — puppeteer `click()` (IntersectionObserver) never resolves (90 s timeout), `waitForFunction`'s default rAF polling evaluates once, `mouse.move` waits on a 5 s fallback per step. Breaks searches and the keep-alive re-auth path.
+- **`--start-minimized`**: not a Chrome switch; silently ignored.
+
+What works: an off-screen `--window-position`. Chromium applies the command-line position verbatim (no clamp onto a display), and chrome-launcher's default flags disable native occlusion tracking (`CalculateNativeWinOcclusion`) and occluded-window backgrounding, so the page stays VISIBLE — rAF, input and `visibilityState` identical to an on-screen window. The legacy hard-coded positions (-2560 / -1600) only hide windows on a single 1080p monitor; on a multi-monitor desktop they land on the left display. `src/browser-window.js` resolves the position from `BOT_WINDOW_POSITION=x,y` (unset = legacy, byte-identical to before; recommended `-20000,0`). Search sessions stagger +320 px per id. Values are capped at ±20000: `-32000` is the sentinel Windows moves minimized HWNDs to (a known hidden-window fingerprint heuristic), and `--window-position` is in DIPs scaled by the nearest display, so larger values can overflow int16 in Win32 after 150% DPI. Keep `y` inside the monitor row so the nearest display (hence DPR / `screen.*`) stays the same.
 
 ### Cookie pipeline health checks
 Do NOT trust these as proof cookies are valid:
@@ -102,4 +111,5 @@ Key `.env` settings (see `docs/cookie-pipeline.md` for full list):
 - `MAX_LAYOVER_HOURS=30`
 - `ALERT_WAITLIST=true`
 - `GONE_GRACE_MISSES=3` — consecutive missed cycles before a flight is treated as gone and removed from state. Guards against ANA's waitlist availability oscillating on/off between cycles, which otherwise deletes + re-alerts the same seat as "new" every pull. Do not set to 1.
+- `BOT_WINDOW_POSITION=-20000,0` — where bot Chrome windows go; unset keeps the legacy positions. See "Hiding bot windows".
 - `STALE_FLIGHT_DAYS=30` — prune cached flights not seen in this many days (backstop for combos that stop being searched, e.g. perpetually rate-limited)

@@ -17,6 +17,7 @@ const path = require('path');
 
 const { isStale, markStale } = require('./session-stale');
 const { cleanupChrome } = require('./chrome-cleanup');
+const { windowPositionArg } = require('./browser-window');
 const COOKIE_PATH = path.join(__dirname, '..', 'data', 'cookies.json');
 const KEEPALIVE_INTERVAL_MS = 25 * 60 * 1000; // Every 25 minutes
 const STALE_THRESHOLD_MS = 2 * 60 * 60 * 1000; // Alert if >2 hours without refresh
@@ -60,7 +61,9 @@ async function refreshSession() {
       headless: false,
       turnstile: true,
       disableXvfb: true,
-      args: ['--start-minimized', '--window-position=-2560,679', '--window-size=800,600'],
+      // Off-screen placement (BOT_WINDOW_POSITION). `--start-minimized` used to be
+      // here too, but it is not a Chrome switch and was ignored.
+      args: [windowPositionArg('keepalive', { log: msg => console.log(`[KeepAlive] ${msg}`) }), '--window-size=800,600'],
       customConfig: {
         chromePath,
         chromiumFlags: ['--disable-backgrounding-occluded-windows'],
