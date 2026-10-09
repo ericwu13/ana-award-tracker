@@ -17,6 +17,7 @@ const path = require('path');
 
 const { isStale, markStale } = require('./session-stale');
 const { cleanupChrome } = require('./chrome-cleanup');
+const { applyWindowPolicy } = require('./browser-window');
 const COOKIE_PATH = path.join(__dirname, '..', 'data', 'cookies.json');
 const KEEPALIVE_INTERVAL_MS = 25 * 60 * 1000; // Every 25 minutes
 const STALE_THRESHOLD_MS = 2 * 60 * 60 * 1000; // Alert if >2 hours without refresh
@@ -73,6 +74,10 @@ async function refreshSession() {
 
     browser = result.browser;
     const page = result.page;
+
+    // Hide the window (BOT_MINIMIZE_WINDOWS=keepalive|all). Done before any
+    // navigation so the ANA page is never painted on the user's screen.
+    await applyWindowPolicy(page, 'keepalive', { log: msg => console.log(`[KeepAlive] ${msg}`) });
 
     // Load cookies
     await page.setCookie(...cookies);

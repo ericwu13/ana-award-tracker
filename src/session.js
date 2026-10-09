@@ -6,6 +6,7 @@ const { connect } = require('puppeteer-real-browser');
 const fs = require('fs');
 const path = require('path');
 const { parseResults, parseFlightDetails, getPageDebugInfo } = require('./parser');
+const { applyWindowPolicy } = require('./browser-window');
 
 const COOKIE_PATH = path.join(__dirname, '..', 'data', 'cookies.json');
 
@@ -88,6 +89,10 @@ class Session {
 
     this.browser = browser;
     this.page = page;
+
+    // Hide the window (BOT_MINIMIZE_WINDOWS=all). Done before any navigation so
+    // the ANA page is never painted on the user's screen.
+    await applyWindowPolicy(page, 'search', { log: msg => this.log(msg) });
 
     // Track virtual mouse position so _moveTo can draw a continuous bezier path
     // from one element to the next instead of teleporting. Akamai's behavioural
