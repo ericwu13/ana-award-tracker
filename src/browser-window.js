@@ -1,101 +1,69 @@
 /**
  * Bot browser window placement — keep headful Chrome off the user's screen.
  *
- * Why not headless:
+ * Why not headless / session 0:
  *   ANA's Akamai Bot Manager fingerprints the browser (WebGL renderer, screen
  *   metrics, ...). The session cookies come from the user's real Chrome on the
- *   same GPU; a headless or session-0 Chrome reports a different renderer and
- *   is far more likely to be flagged, which stalls the whole bot (markStale).
+ *   same GPU; a headless or non-interactive-session Chrome reports a different
+ *   renderer and is far more likely to be flagged, which stalls the bot.
  *
- * Why `--window-position` off-screen and `--start-minimized` don't work:
- *   Chromium clamps a new window so that part of it stays on a display, and
- *   `--start-minimized` is not a Chrome switch (only --start-maximized /
- *   --start-fullscreen exist), so both were no-ops.
+ * Why not minimize (CDP Browser.setWindowBounds windowState=minimized):
+ *   On Windows a minimized window is HIDDEN to the renderer, so BeginMainFrame
+ *   stops: puppeteer's click() (IntersectionObserver) never resolves,
+ *   waitForFunction's rAF polling evaluates once, and every mouse.move waits on
+ *   a 5 s fallback timer. The bot breaks before Akamai even gets a vote.
  *
- * What this does instead:
- *   Right after puppeteer connects, ask Chrome over CDP to minimize the window
- *   (`Browser.setWindowBounds { windowState: 'minimized' }`). The page keeps
- *   running at full speed (chrome-launcher's default flags include
- *   --disable-backgrounding-occluded-windows), CDP input events don't need a
- *   visible window, and Chrome doesn't composite a minimized window, so the
- *   GPU stays idle while the bot runs.
+ * What works: an off-screen --window-position.
+ *   Chromium applies a command-line --window-position verbatim (no clamp onto a
+ *   display), and chrome-launcher's default flags disable native window
+ *   occlusion tracking and occluded-window backgrounding, so a window placed
+ *   outside the virtual desktop stays VISIBLE to the renderer: rAF, clicks,
+ *   mouse input and visibilityState are identical to an on-screen window. The
+ *   old hard-coded -1920 / -2560 positions were "off-screen" only for a single
+ *   1080p monitor; on a multi-monitor desktop they land on the left display.
  *
- * Caveats:
- *   - `document.visibilityState` becomes 'hidden' in a minimized window. Whether
- *     Akamai's sensor treats that as a signal is unknown, so this is gated by
- *     BOT_MINIMIZE_WINDOWS and should be rolled out keep-alive first.
- *   - `page.screenshot()` can fail on a minimized window. Every screenshot in
- *     this codebase is already inside try/catch.
- *   - The window still flashes for a moment while Chrome starts, before CDP is up.
- *
- * Config: BOT_MINIMIZE_WINDOWS = off (default) | keepalive | all
+ * Config: BOT_WINDOW_POSITION = "x,y"  (unset = legacy positions, no change)
+ *   Recommended: -32000,-32000 — outside any realistic virtual desktop.
+ *   Search sessions are offset by +320px per session id so they don't overlap.
  */
 
-const SCOPES = new Set(['off', 'keepalive', 'all']);
+// Exactly what master produced: keep-alive at -2560, search session N at
+// -1920 + N*320 (so session 1 = -1600, session 2 = -1280).
+const LEGACY = {
+  keepalive: { x: -2560, y: 679 },
+  search: { x: -1600, y: 679 },
+};
+const SEARCH_STAGGER_PX = 320;
 
 /**
- * Normalise the BOT_MINIMIZE_WINDOWS env value.
+ * Parse "x,y". Returns null for unset / malformed values.
  * @param {string|undefined} raw
- * @returns {'off'|'keepalive'|'all'}
+ * @returns {{x:number, y:number}|null}
  */
-function resolveMinimizeScope(raw) {
-  const v = String(raw ?? '').trim().toLowerCase();
-  if (SCOPES.has(v)) return v;
-  if (['1', 'true', 'yes', 'on'].includes(v)) return 'all';
-  return 'off';
+function parseWindowPosition(raw) {
+  if (raw == null) return null;
+  const m = /^\s*(-?\d{1,6})\s*,\s*(-?\d{1,6})\s*$/.exec(String(raw));
+  if (!m) return null;
+  return { x: parseInt(m[1], 10), y: parseInt(m[2], 10) };
 }
 
 /**
- * @param {'off'|'keepalive'|'all'} scope
- * @param {'keepalive'|'search'} role
- */
-function shouldMinimize(scope, role) {
-  if (scope === 'all') return true;
-  if (scope === 'keepalive') return role === 'keepalive';
-  return false;
-}
-
-/**
- * Minimize the Chrome window that hosts `page`. Never throws; resolves true on
- * success, false otherwise. Bounded by `timeoutMs` so a wedged CDP can't stall
- * the caller.
+ * Resolve the window position for a bot browser.
  *
- * @param {import('puppeteer').Page} page
- * @param {{ log?: Function, timeoutMs?: number }} [opts]
+ * @param {'keepalive'|'search'} role
+ * @param {{ id?: number, env?: NodeJS.ProcessEnv }} [opts]  id = search session id (1-based)
+ * @returns {{x:number, y:number}}
  */
-async function minimizeWindow(page, { log = () => {}, timeoutMs = 5000 } = {}) {
-  let client = null;
-  let timer = null;
-  const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`minimizeWindow timed out after ${timeoutMs}ms`)), timeoutMs);
-  });
-  try {
-    const work = (async () => {
-      client = await page.createCDPSession();
-      const { windowId } = await client.send('Browser.getWindowForTarget');
-      await client.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'minimized' } });
-      return true;
-    })();
-    const ok = await Promise.race([work, timeout]);
-    log('Window minimized');
-    return ok;
-  } catch (e) {
-    log(`Could not minimize window: ${e.message}`);
-    return false;
-  } finally {
-    clearTimeout(timer);
-    if (client) { try { await client.detach(); } catch {} }
-  }
+function resolveWindowPosition(role, { id = 1, env = process.env } = {}) {
+  const base = parseWindowPosition(env.BOT_WINDOW_POSITION) || LEGACY[role] || LEGACY.search;
+  const stagger = role === 'search' ? Math.max(0, id - 1) * SEARCH_STAGGER_PX : 0;
+  return { x: base.x + stagger, y: base.y };
 }
 
-/**
- * Convenience: read the env, decide for `role`, and minimize if enabled.
- * @returns {Promise<boolean>} whether a minimize was attempted and succeeded
- */
-async function applyWindowPolicy(page, role, { log, env = process.env } = {}) {
-  const scope = resolveMinimizeScope(env.BOT_MINIMIZE_WINDOWS);
-  if (!shouldMinimize(scope, role)) return false;
-  return minimizeWindow(page, { log });
+/** `--window-position=x,y` ready to push into Chrome args. */
+function windowPositionArg(role, opts) {
+  const { x, y } = resolveWindowPosition(role, opts);
+  return `--window-position=${x},${y}`;
 }
 
-module.exports = { resolveMinimizeScope, shouldMinimize, minimizeWindow, applyWindowPolicy };
+module.exports = { parseWindowPosition, resolveWindowPosition, windowPositionArg, LEGACY, SEARCH_STAGGER_PX };

@@ -16,7 +16,7 @@ node test/routes.test.js          # routes data model, per-date cabins, date par
 node test/parser.test.js          # per-flight miles extraction from ANA HTML
 node test/gone-detection.test.js  # GONE grace period
 node test/chrome-cleanup.test.js  # orphaned bot-Chrome classification
-node test/browser-window.test.js  # BOT_MINIMIZE_WINDOWS policy + CDP minimize
+node test/browser-window.test.js  # BOT_WINDOW_POSITION resolution
 ```
 
 No test framework — uses built-in `assert`. Exits with code 1 on failure.
@@ -41,7 +41,12 @@ ANA uses Akamai Bot Manager. The "heavy traffic" / "request cannot be accepted" 
 Safety rules baked in — keep them: if the PowerShell listing fails, nothing is killed or swept (an empty list ≠ no bot browsers); the kill pipeline re-checks name + command line so a reused pid can't be hit; helpers whose browser pid is still alive are never killed even if its command line is unreadable; stale `%TEMP%\lighthouse.*` dirs are only swept once >10 min old (chrome-launcher mkdirs before Chrome shows up in the process list). `--disable-backgrounding-occluded-windows` is already in chrome-launcher's DEFAULT_FLAGS; `customConfig.chromiumFlags` is ignored by chrome-launcher, and `customConfig.chromeFlags` would *replace* the whole flag list — don't use either.
 
 ### Hiding bot windows
-Do NOT switch to headless or run the bot in a non-interactive session (Task Scheduler "run whether user is logged on or not"): Akamai fingerprints the WebGL renderer and screen metrics, and the cookies come from the user's real Chrome on the same GPU. `--window-position` off-screen and `--start-minimized` are both no-ops (Chromium clamps windows onto a display; `--start-minimized` isn't a Chrome switch). `src/browser-window.js` instead minimizes the window over CDP (`Browser.setWindowBounds`) right after connect, gated by `BOT_MINIMIZE_WINDOWS=off|keepalive|all` (default off). Minimized windows aren't composited, so the GPU stays idle while the bot runs. Roll out `keepalive` first and watch a few cycles: a minimized page reports `visibilityState: 'hidden'`, and whether Akamai cares is unverified. All `page.screenshot()` calls must stay inside try/catch — they can fail on a minimized window.
+Three things that do NOT work, with the reason, so nobody retries them:
+- **Headless / non-interactive session** (Task Scheduler "run whether user is logged on or not"): Akamai fingerprints the WebGL renderer and screen metrics; the cookies come from the user's real Chrome on the same GPU, so a SwiftShader renderer is a mismatch.
+- **Minimizing** (CDP `Browser.setWindowBounds windowState=minimized`): on Windows a minimized window is HIDDEN to the renderer and BeginMainFrame stops — puppeteer `click()` (IntersectionObserver) never resolves (90 s timeout), `waitForFunction`'s default rAF polling evaluates once, `mouse.move` waits on a 5 s fallback per step. Breaks searches and the keep-alive re-auth path.
+- **`--start-minimized`**: not a Chrome switch; silently ignored.
+
+What works: an off-screen `--window-position`. Chromium applies the command-line position verbatim (no clamp onto a display), and chrome-launcher's default flags disable native occlusion tracking (`CalculateNativeWinOcclusion`) and occluded-window backgrounding, so the page stays VISIBLE — rAF, input and `visibilityState` identical to an on-screen window. The legacy hard-coded positions (-2560 / -1600) only hide windows on a single 1080p monitor; on a multi-monitor desktop they land on the left display. `src/browser-window.js` resolves the position from `BOT_WINDOW_POSITION=x,y` (unset = legacy, byte-identical to before; recommended `-32000,-32000`). Search sessions stagger +320 px per id.
 
 ### Cookie pipeline health checks
 Do NOT trust these as proof cookies are valid:
@@ -106,4 +111,5 @@ Key `.env` settings (see `docs/cookie-pipeline.md` for full list):
 - `MAX_LAYOVER_HOURS=30`
 - `ALERT_WAITLIST=true`
 - `GONE_GRACE_MISSES=3` — consecutive missed cycles before a flight is treated as gone and removed from state. Guards against ANA's waitlist availability oscillating on/off between cycles, which otherwise deletes + re-alerts the same seat as "new" every pull. Do not set to 1.
+- `BOT_WINDOW_POSITION=-32000,-32000` — where bot Chrome windows go; unset keeps the legacy positions. See "Hiding bot windows".
 - `STALE_FLIGHT_DAYS=30` — prune cached flights not seen in this many days (backstop for combos that stop being searched, e.g. perpetually rate-limited)
