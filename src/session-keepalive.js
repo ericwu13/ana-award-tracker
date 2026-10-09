@@ -63,7 +63,7 @@ async function refreshSession() {
       disableXvfb: true,
       // Off-screen placement (BOT_WINDOW_POSITION). `--start-minimized` used to be
       // here too, but it is not a Chrome switch and was ignored.
-      args: [windowPositionArg('keepalive'), '--window-size=800,600'],
+      args: [windowPositionArg('keepalive', { log: msg => console.log(`[KeepAlive] ${msg}`) }), '--window-size=800,600'],
       customConfig: {
         chromePath,
         chromiumFlags: ['--disable-backgrounding-occluded-windows'],

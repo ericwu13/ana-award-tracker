@@ -61,7 +61,7 @@ class Session {
     const args = [
       // Off-screen placement (BOT_WINDOW_POSITION). `--start-minimized` used to be
       // here too, but it is not a Chrome switch and was ignored.
-      windowPositionArg('search', { id: this.id }),
+      windowPositionArg('search', { id: this.id, log: msg => this.log(msg) }),
       '--window-size=1280,900',
     ];
 

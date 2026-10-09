@@ -23,7 +23,14 @@
  *   1080p monitor; on a multi-monitor desktop they land on the left display.
  *
  * Config: BOT_WINDOW_POSITION = "x,y"  (unset = legacy positions, no change)
- *   Recommended: -32000,-32000 — outside any realistic virtual desktop.
+ *   Recommended: -20000,0 — outside any realistic virtual desktop, but:
+ *     - NOT -32000: that is the exact sentinel Windows moves minimized HWNDs
+ *       to, and "screenX === -32000" is a known hidden-window heuristic;
+ *     - |x| kept so the pixel coordinate stays inside int16 even at 150% DPI
+ *       (--window-position is in DIPs, scaled by the nearest display);
+ *     - y inside the monitor row keeps the nearest display (hence DPR and
+ *       screen.*) the same as before.
+ *   Values are capped to ±MAX_ABS for the same reason.
  *   Search sessions are offset by +320px per session id so they don't overlap.
  */
 
@@ -34,9 +41,11 @@ const LEGACY = {
   search: { x: -1600, y: 679 },
 };
 const SEARCH_STAGGER_PX = 320;
+// 20000 DIP * 1.5 (150% DPI) = 30000 px < 32767. Larger values are refused.
+const MAX_ABS = 20000;
 
 /**
- * Parse "x,y". Returns null for unset / malformed values.
+ * Parse "x,y". Returns null for unset / malformed / out-of-range values.
  * @param {string|undefined} raw
  * @returns {{x:number, y:number}|null}
  */
@@ -44,18 +53,26 @@ function parseWindowPosition(raw) {
   if (raw == null) return null;
   const m = /^\s*(-?\d{1,6})\s*,\s*(-?\d{1,6})\s*$/.exec(String(raw));
   if (!m) return null;
-  return { x: parseInt(m[1], 10), y: parseInt(m[2], 10) };
+  const x = parseInt(m[1], 10), y = parseInt(m[2], 10);
+  if (Math.abs(x) > MAX_ABS || Math.abs(y) > MAX_ABS) return null;
+  return { x, y };
 }
 
 /**
  * Resolve the window position for a bot browser.
  *
  * @param {'keepalive'|'search'} role
- * @param {{ id?: number, env?: NodeJS.ProcessEnv }} [opts]  id = search session id (1-based)
+ * @param {{ id?: number, env?: NodeJS.ProcessEnv, log?: Function }} [opts]
+ *   id = search session id (1-based); log receives a warning on a malformed env value
  * @returns {{x:number, y:number}}
  */
-function resolveWindowPosition(role, { id = 1, env = process.env } = {}) {
-  const base = parseWindowPosition(env.BOT_WINDOW_POSITION) || LEGACY[role] || LEGACY.search;
+function resolveWindowPosition(role, { id = 1, env = process.env, log = null } = {}) {
+  const raw = env.BOT_WINDOW_POSITION;
+  const configured = parseWindowPosition(raw);
+  if (raw != null && String(raw).trim() !== '' && !configured && log) {
+    log(`BOT_WINDOW_POSITION=${JSON.stringify(raw)} is not "x,y" within ±${MAX_ABS} — using legacy window position`);
+  }
+  const base = configured || LEGACY[role] || LEGACY.search;
   const stagger = role === 'search' ? Math.max(0, id - 1) * SEARCH_STAGGER_PX : 0;
   return { x: base.x + stagger, y: base.y };
 }
@@ -66,4 +83,4 @@ function windowPositionArg(role, opts) {
   return `--window-position=${x},${y}`;
 }
 
-module.exports = { parseWindowPosition, resolveWindowPosition, windowPositionArg, LEGACY, SEARCH_STAGGER_PX };
+module.exports = { parseWindowPosition, resolveWindowPosition, windowPositionArg, LEGACY, SEARCH_STAGGER_PX, MAX_ABS };
