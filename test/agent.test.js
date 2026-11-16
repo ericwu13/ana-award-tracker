@@ -18,7 +18,7 @@ process.env.ANA_DATA_DIR = DATA;
 delete process.env.ROUTES;
 const { GoogleGenAI } = require('@google/genai');
 const api = require('../src/tracker-api');
-const { createAgent, SYSTEM_PROMPT, SETUP_HINT } = require('../src/agent');
+const { createAgent, localizeTimes, SYSTEM_PROMPT, SETUP_HINT } = require('../src/agent');
 const chatMod = require('../src/discord-chat');
 
 const day = (n) => new Date(Date.now() + n * 86400000).toISOString().slice(0, 10);
@@ -74,7 +74,7 @@ test('a clear request is carried out and the reply returned; the request is buil
   assert.strictEqual(first.method, 'POST');
   assert.match(first.url, /\/interactions$/);
   assert.strictEqual(first.key, 'test-key');
-  assert.strictEqual(first.body.model, 'gemini-4-hydrogen');
+  assert.strictEqual(first.body.model, 'gemini-3.5-flash-lite');
   assert.strictEqual(first.body.store, false, 'nothing is kept on Google\'s side');
   assert.strictEqual(first.body.system_instruction, SYSTEM_PROMPT);
   assert.strictEqual(first.body.generation_config, undefined);
@@ -193,6 +193,22 @@ test('get_flights and recent_changes hand the model the tracker\'s data', async 
   assert.strictEqual(changes.events[0].type, 'new');
 });
 
+test('timestamps reach the model in Pacific time with their age, never as raw UTC', async () => {
+  const now = Date.parse('2026-11-16T05:14:00Z'); // 9:14 PM PST on Nov 15
+  assert.deepStrictEqual(
+    localizeTimes({ lastCheck: '2026-11-16T04:36:00.123Z', date: '2026-12-06', n: 3, list: [{ ts: '2026-11-14T05:14:00Z' }], next: '2026-11-16T08:14:00Z', none: null }, now),
+    { lastCheck: 'Sun, Nov 15, 8:36 PM Pacific (38 min ago)', date: '2026-12-06', n: 3, list: [{ ts: 'Fri, Nov 13, 9:14 PM Pacific (2 days ago)' }], next: 'Mon, Nov 16, 12:14 AM Pacific (in 3 hours)', none: null },
+  );
+
+  reset(); requests = [];
+  fs.writeFileSync(path.join(DATA, 'state.json'), JSON.stringify({ lastCheck: '2026-11-16T04:36:00Z', flights: {} }));
+  script = [call(fnCall('t1', 'get_status', {})), say('Last check was 38 minutes ago.')];
+  await ask(newAgent({ now: () => now }), 'how did the last check go?');
+  const status = JSON.parse(toolResults(1)[0].result);
+  assert.strictEqual(status.lastCheck, 'Sun, Nov 15, 8:36 PM Pacific (38 min ago)');
+  assert.ok(!/T\d\d:\d\d:\d\d.*Z/.test(toolResults(1)[0].result), 'no raw UTC timestamp left in the result');
+});
+
 test('run_check_now starts a check unless one is already running', async () => {
   reset(); requests = [];
   let started = 0;
@@ -288,8 +304,8 @@ test('without a key the agent explains how to set it up and calls nothing', asyn
 test('AGENT_MODEL and AGENT_EFFORT override the defaults', async () => {
   requests = [];
   script = [say('ok')];
-  await ask(newAgent({ env: { AGENT_MODEL: 'gemini-3.5-flash-lite', AGENT_EFFORT: 'low' } }), 'hi');
-  assert.strictEqual(requests[0].body.model, 'gemini-3.5-flash-lite');
+  await ask(newAgent({ env: { AGENT_MODEL: 'gemini-4-hydrogen', AGENT_EFFORT: 'low' } }), 'hi');
+  assert.strictEqual(requests[0].body.model, 'gemini-4-hydrogen');
   assert.deepStrictEqual(requests[0].body.generation_config, { thinking_level: 'low' });
 });
 

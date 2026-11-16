@@ -55,6 +55,46 @@ function listTracked() {
   };
 }
 
+/** Collapse sorted ISO dates into runs of consecutive days: "A to B" or a single "A". */
+function collapseDates(sortedDates) {
+  const dayNumber = (iso) => { const [y, m, d] = iso.split('-').map(Number); return Date.UTC(y, m - 1, d) / 86400000; };
+  const runs = [];
+  for (const date of sortedDates) {
+    const last = runs[runs.length - 1];
+    if (last && dayNumber(date) - dayNumber(last.to) === 1) last.to = date;
+    else runs.push({ from: date, to: date });
+  }
+  return runs.map(r => (r.from === r.to ? r.from : `${r.from} to ${r.to}`));
+}
+
+/**
+ * The watch list in the shape that is easiest to read back correctly: one
+ * entry per route with explicit counts, and consecutive days already collapsed
+ * into ranges per cabin set. (A model handed 40 raw dates in a nested map
+ * dropped a route and bridged a gap when summarising them.)
+ */
+function describeTracked() {
+  const routes = loadRoutes().map(r => {
+    const byCabins = new Map();
+    for (const date of Object.keys(r.dates || {}).sort()) {
+      const key = r.dates[date].join(' + ');
+      if (!byCabins.has(key)) byCabins.set(key, []);
+      byCabins.get(key).push(date);
+    }
+    return {
+      route: `${r.from}→${r.to}`,
+      dateCount: Object.keys(r.dates || {}).length,
+      tracked: [...byCabins.entries()].map(([cabins, dates]) => ({ cabins, dates: collapseDates(dates) })),
+    };
+  });
+  return {
+    routeCount: routes.length,
+    totalDates: routes.reduce((n, r) => n + r.dateCount, 0),
+    routes,
+    earliestBookableDate: minBookableDate(),
+  };
+}
+
 /**
  * Work out what a track request would do, without doing it.
  * `date` is YYYY-MM-DD, YYYY-MM (weekly sample of that month) or a
@@ -279,6 +319,6 @@ function recentEvents({ sinceHours = 24, limit = 50, from, to } = {}) {
 
 module.exports = {
   InputError, TRACK_CABINS, SINGLE_CABINS,
-  listTracked, planTrack, track, planUntrack, untrack,
+  listTracked, describeTracked, collapseDates, planTrack, track, planUntrack, untrack,
   getFlights, getStatus, recentEvents, isCheckRunning, cabinClassOf,
 };

@@ -84,13 +84,14 @@ ANA's site is built on JSF. Error pages have hidden ViewState inputs, so rate-li
 `@mention` the bot in the server (replying to one of its alerts counts) or DM it, and it answers in plain language: "watch SFO→TPE business Dec 10–15", "anything bookable to Tokyo under 60k?", "what changed overnight?". It only speaks when addressed.
 
 - **`src/tracker-api.js`** — track / untrack / flights / status / recent events as plain functions over `routes.json`, `state.json` and `events.jsonl`. `/untrack` goes through it too, so both front ends remove things identically. Bad input throws `InputError`.
-- **`src/agent.js`** — Gemini (`AGENT_MODEL`, default `gemini-4-hydrogen`) with those functions as tools, over Google's Interactions API (`@google/genai`, `client.interactions.create`). It runs the request → tool → request loop itself and sends `store: false`, so the conversation lives only in the bot process. No Discord code.
+- **`src/agent.js`** — Gemini (`AGENT_MODEL`, default `gemini-3.5-flash-lite`, Google's lightest current model) with those functions as tools, over Google's Interactions API (`@google/genai`, `client.interactions.create`). It runs the request → tool → request loop itself and sends `store: false`, so the conversation lives only in the bot process. No Discord code.
 - **`src/discord-chat.js`** — the Discord side: who may talk to it, mention stripping, reply-to-alert context, Confirm/Cancel buttons.
 
 Rules that must survive edits:
 - **Confirmation is enforced in code, not by the model.** A `track` adding more than 14 new dates, or an `untrack` of a whole route or more than 3 dates, is parked and shown as a button; only a click from the user who asked runs it (`resolveConfirmation`). Don't move that decision into the prompt.
 - **History is append-only.** In stateless mode the API requires `thought` and `function_call` steps to be sent back exactly as received (they carry signatures). So steps are never edited, the system prompt is a constant, today's date and confirmation outcomes ride in the *user* message, and an old or long conversation is dropped whole, never trimmed. `test/agent.test.js` pins this.
 - **The SDK's Interactions errors are not the exported `ApiError`.** Classify failures by the numeric `err.status`; an invalid key arrives as a 400 whose message mentions the API key (`describeApiFailure`). The SDK retries 429/5xx itself (`REQUEST_OPTIONS.maxRetries`).
+- **Tool output is shaped for a small model.** Two mistakes seen live with `gemini-3.5-flash-lite` on raw data, both fixed in the output rather than the prompt: it read a UTC `lastCheck` as local time, and it bridged a gap when condensing 40 raw dates. So `localizeTimes` (agent.js) rewrites every UTC timestamp in a tool result to Pacific time with its age, and `describeTracked` (tracker-api.js) hands over routes with explicit counts and dates pre-collapsed into ranges. Keep new tool results in that spirit: small, already summarised, no unit or time-zone conversion left to the model.
 - **Owner only.** `AGENT_USER_IDS`, else the owner of `DISCORD_GUILD_ID`; everyone else is ignored silently. It needs only the non-privileged `GuildMessages`/`DirectMessages` intents — Discord delivers message text for mentions and DMs without the Message Content intent.
 - The agent can't search ANA or book; it reads what the search cycle stored and edits the watch list. `run_check_now` spawns the same `run-once.js` as `/check`.
 
@@ -131,7 +132,7 @@ Key `.env` settings (see `docs/cookie-pipeline.md` for full list):
 - `ANA_USERNAME` / `ANA_PASSWORD` — AMC credentials for auto re-auth
 - `DISCORD_BOT_TOKEN` / `DISCORD_GUILD_ID` — Discord bot
 - `DISCORD_ALERT_CHANNEL_ID` / `DISCORD_STATUS_CHANNEL_ID`
-- `GEMINI_API_KEY` — enables the chat agent (usage counts against that key's Gemini quota/billing). `AGENT_MODEL` (default `gemini-4-hydrogen`), `AGENT_EFFORT` (optional thinking level: minimal|low|medium|high|xhigh; unset = model default), `AGENT_USER_IDS` (default: server owner). See "Chat agent".
+- `GEMINI_API_KEY` — enables the chat agent (usage counts against that key's Gemini quota/billing). `AGENT_MODEL` (default `gemini-3.5-flash-lite`; e.g. `gemini-4-hydrogen` for a larger one), `AGENT_EFFORT` (optional thinking level: minimal|low|medium|high|xhigh; unset = model default), `AGENT_USER_IDS` (default: server owner). See "Chat agent".
 - `MAX_SESSIONS=2` — parallel browser sessions
 - `SKIP_KNOWN_AVAILABLE=false` — always re-search confirmed combos (default OFF so GONE detection works)
 - `RECHECK_HOURS=4` — only relevant if SKIP_KNOWN_AVAILABLE=true

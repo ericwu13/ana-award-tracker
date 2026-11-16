@@ -27,7 +27,12 @@ const { GoogleGenAI } = require('@google/genai');
 const api = require('./tracker-api');
 const { todayPST } = require('./routes');
 
-const DEFAULT_MODEL = 'gemini-4-hydrogen';
+// Google's fastest, lowest-cost current model. The job is tool routing over
+// small, pre-digested results, which it handles; it is NOT trusted to convert
+// time zones or condense long raw lists, so tool output is shaped for it
+// (see localizeTimes below and tracker-api.describeTracked). A larger model
+// can be set with AGENT_MODEL.
+const DEFAULT_MODEL = 'gemini-3.5-flash-lite';
 const MAX_MODEL_CALLS_PER_TURN = 8;
 const REQUEST_OPTIONS = { maxRetries: 2, timeout: 120000 };
 
@@ -44,7 +49,7 @@ const SYSTEM_PROMPT = `You are the chat front end of a personal ANA (All Nippon 
 
 How the tracker works, so your answers are accurate:
 - The watch list is per route (from→to), per date, per cabin: economy, premium-economy, business. Airports are 3-letter IATA codes; ANA also accepts city codes such as TYO (Tokyo: HND and NRT). Each direction is its own route, so a round trip is two routes.
-- Seat data comes from the most recent search of each date, so it can be a few hours old; the status tool says when the last check ran. A newly tracked date has no data until the next check. Starting a check on demand takes about 40 minutes; the hourly run would pick it up anyway.
+- Seat data comes from the most recent search of each date, so it can be a few hours old; the status tool says when the last check ran. Times in tool results are already in US Pacific time with their age; repeat them as given. A newly tracked date has no data until the next check. Starting a check on demand takes about 40 minutes; the hourly run would pick it up anyway.
 - "confirmed" seats can be booked now; "waitlist" seats cannot. Talk about confirmed seats unless the user asks about waitlist.
 - Miles are one-way per person for the whole itinerary; taxUsd is the cash co-pay on top.
 - ANA stops booking award seats 96 hours before departure, and the tracker drops dates inside that window.
@@ -63,6 +68,34 @@ const CABIN_ENUM = { type: 'string', enum: api.SINGLE_CABINS };
 const AIRPORT = (what) => ({ type: 'string', description: `${what} airport or city code, 3 letters (e.g. SFO, TPE, TYO)` });
 
 function plural(n, word) { return `${n} ${word}${n === 1 ? '' : 's'}`; }
+
+const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
+
+/** "Sun, Nov 15, 8:36 PM Pacific (38 min ago)" for a UTC ISO timestamp. */
+function localTime(iso, nowMs) {
+  const d = new Date(iso);
+  if (isNaN(d)) return iso;
+  const text = d.toLocaleString('en-US', {
+    timeZone: 'America/Los_Angeles', weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true,
+  });
+  const mins = Math.round(Math.abs(nowMs - d.getTime()) / 60000);
+  const span = mins < 90 ? `${mins} min` : mins < 48 * 60 ? `${Math.round(mins / 60)} hours` : `${Math.round(mins / 1440)} days`;
+  return `${text} Pacific (${d.getTime() <= nowMs ? `${span} ago` : `in ${span}`})`;
+}
+
+/**
+ * Rewrite every UTC timestamp in a tool result into the user's local time with
+ * its age. The tracker stores UTC; a small model reading "…T04:36:00Z" reported
+ * it as "4:36 AM today" when it was 8:36 PM the previous evening.
+ */
+function localizeTimes(value, nowMs) {
+  if (typeof value === 'string') return ISO_UTC.test(value) ? localTime(value, nowMs) : value;
+  if (Array.isArray(value)) return value.map(v => localizeTimes(v, nowMs));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, localizeTimes(v, nowMs)]));
+  }
+  return value;
+}
 
 function describeTrackResult(r) {
   const parts = [];
@@ -89,8 +122,8 @@ function describeUntrackResult(route, r) {
 const TOOLS = [
   {
     name: 'list_tracked',
-    description: 'The watch list: every tracked route with its dates and the cabins tracked on each date.',
-    run: () => JSON.stringify(api.listTracked()),
+    description: 'The watch list: every tracked route (routeCount of them) with its dates, already grouped into ranges of consecutive days per cabin set. A gap between two ranges means those days are not tracked.',
+    run: () => JSON.stringify(api.describeTracked()),
   },
   {
     name: 'get_flights',
@@ -272,7 +305,8 @@ function createAgent({ triggerCheck = null, client = null, requestOptions = REQU
     if (!tool) return { ...result, is_error: true, result: `Unknown tool "${call.name}"` };
     try {
       ctx.toolsRan = true;
-      return { ...result, result: await tool.run(call.arguments || {}, ctx) };
+      const output = JSON.parse(await tool.run(call.arguments || {}, ctx));
+      return { ...result, result: JSON.stringify(localizeTimes(output, now())) };
     } catch (e) {
       if (!(e instanceof api.InputError)) console.error(`[Chat] Tool ${call.name} failed:`, e);
       return { ...result, is_error: true, result: `Error: ${e.message}` };
@@ -422,4 +456,4 @@ function createAgent({ triggerCheck = null, client = null, requestOptions = REQU
   return { configured, model, handle, resolveConfirmation };
 }
 
-module.exports = { createAgent, SYSTEM_PROMPT, SETUP_HINT, DEFAULT_MODEL, TOOL_DECLARATIONS, TRACK_CONFIRM_ABOVE_NEW_DATES, UNTRACK_CONFIRM_ABOVE_DATES };
+module.exports = { createAgent, localizeTimes, SYSTEM_PROMPT, SETUP_HINT, DEFAULT_MODEL, TOOL_DECLARATIONS, TRACK_CONFIRM_ABOVE_NEW_DATES, UNTRACK_CONFIRM_ABOVE_DATES };

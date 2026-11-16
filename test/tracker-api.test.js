@@ -65,6 +65,31 @@ test('rejects bad airports, same-airport routes, unknown cabins and unreadable d
   assert.throws(() => api.planTrack({ from: 'SFO', to: 'TPE', date: 'next friday' }), api.InputError);
 });
 
+console.log('describeTracked');
+test('collapses consecutive days into ranges per cabin set, keeps gaps, and counts explicitly', () => {
+  reset();
+  api.track({ from: 'SFO', to: 'TPE', date: day(30), until: day(33), cabin: 'business' });
+  api.track({ from: 'SFO', to: 'TPE', date: day(35), until: day(36), cabin: 'business' }); // day 34 is a gap
+  api.track({ from: 'SFO', to: 'TPE', date: day(40) });                                     // PE + business
+  api.track({ from: 'TYO', to: 'TPE', date: day(50), cabin: 'economy' });
+  const d = api.describeTracked();
+  assert.strictEqual(d.routeCount, 2);
+  assert.strictEqual(d.totalDates, 8);
+  assert.deepStrictEqual(d.routes[0], {
+    route: 'SFO→TPE', dateCount: 7,
+    tracked: [
+      { cabins: 'business', dates: [`${day(30)} to ${day(33)}`, `${day(35)} to ${day(36)}`] },
+      { cabins: 'premium-economy + business', dates: [day(40)] },
+    ],
+  });
+  assert.deepStrictEqual(d.routes[1].tracked, [{ cabins: 'economy', dates: [day(50)] }]);
+});
+test('date ranges do not bridge month or year ends incorrectly', () => {
+  assert.deepStrictEqual(api.collapseDates(['2026-12-30', '2026-12-31', '2027-01-01', '2027-01-03']), ['2026-12-30 to 2027-01-01', '2027-01-03']);
+  assert.deepStrictEqual(api.collapseDates(['2028-02-28', '2028-02-29', '2028-03-01']), ['2028-02-28 to 2028-03-01']);
+  assert.deepStrictEqual(api.collapseDates([]), []);
+});
+
 console.log('untrack');
 test('planUntrack sees a whole-route removal, a partial one, and an untracked route', () => {
   reset();
