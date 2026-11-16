@@ -2,7 +2,8 @@
  * Discord slash command registration and handling.
  */
 const { REST, Routes, SlashCommandBuilder } = require('discord.js');
-const { addRoute, removeRoute, syncState, parseDateInput, expandDateRange, formatStatus, formatRoutes, formatFlights, loadRoutes, saveRoutes } = require('./routes');
+const { addRoute, syncState, parseDateInput, expandDateRange, formatStatus, formatRoutes, formatFlights } = require('./routes');
+const trackerApi = require('./tracker-api');
 
 /**
  * Define slash commands.
@@ -167,85 +168,21 @@ async function handleCommand(interaction, triggerCheck) {
     const untilInput = interaction.options.getString('until');
     const cabin = interaction.options.getString('cabin'); // optional
 
-    let dates = null;
-    if (untilInput && dateInput) {
-      // Range mode: date → until (daily)
-      dates = expandDateRange(dateInput.trim(), untilInput.trim());
-      if (!dates) {
-        await interaction.reply(`❌ Invalid date range: \`${dateInput}\` to \`${untilInput}\``);
-        return;
-      }
-    } else if (dateInput) {
-      const trimmed = dateInput.trim();
-      if (/^\d{4}-\d{2}$/.test(trimmed)) {
-        // Month input (YYYY-MM): find ALL dates in this route that fall in that
-        // month, not just the parseDateInput weekly expansion. This handles the
-        // case where dates were added individually (12-02, 12-03, etc.) but the
-        // user untracks by month — they expect ALL December dates removed.
-        const currentRoutes = loadRoutes();
-        const route = currentRoutes.find(r => r.from === from && r.to === to);
-        if (route && route.dates) {
-          const monthDates = Object.keys(route.dates).filter(d => d.startsWith(trimmed));
-          // Also include the parseDateInput expansion so dates not yet in the
-          // route (edge case) are covered
-          const expanded = parseDateInput(dateInput) || [];
-          dates = [...new Set([...monthDates, ...expanded])];
-        } else {
-          dates = parseDateInput(dateInput);
-        }
-      } else {
-        dates = parseDateInput(dateInput);
-      }
-      if (!dates) {
-        await interaction.reply(`❌ Invalid date format: \`${dateInput}\``);
-        return;
-      }
+    // Date resolution (ranges, whole months) and cached-flight cleanup live in
+    // tracker-api so the chat agent removes things exactly the same way.
+    let result;
+    try {
+      result = trackerApi.untrack({ from, to, date: dateInput, until: untilInput, cabin });
+    } catch (e) {
+      if (!(e instanceof trackerApi.InputError)) throw e;
+      await interaction.reply(`❌ ${e.message}`);
+      return;
     }
-
-    const result = removeRoute(from, to, dates, cabin);
     if (!result.removed) {
       await interaction.reply(`❌ Route ${from}→${to} not found.`);
       return;
     }
-
-    // Clean cached flight data + lastChecked entries for removed dates.
-    // For month-based untrack (YYYY-MM), use prefix matching on state keys
-    // instead of relying solely on result.removedDates — this catches orphaned
-    // entries from prior buggy /untrack calls that removed routes but failed
-    // to clean state (e.g., parseDateInput expansion mismatch).
-    const fs = require('fs');
-    const path = require('path');
-    const stateFile = path.join(__dirname, '..', 'data', 'state.json');
-    let cleaned = 0;
-    const isMonthInput = dateInput && /^\d{4}-\d{2}$/.test(dateInput.trim());
-    try {
-      const state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
-      const routeLabel = `${from}→${to}`;
-
-      const shouldCleanKey = (key) => {
-        if (!key.startsWith(`${routeLabel}|`)) return false;
-        if (result.removedEntireRoute) return true;
-        // Month-based full removal (no cabin filter): clean by month prefix
-        // to catch orphaned daily entries that aren't in result.removedDates
-        if (!cabin && isMonthInput) {
-          const [, flightDate] = key.split('|');
-          return flightDate && flightDate.startsWith(dateInput.trim());
-        }
-        // Specific dates: clean only those actually removed from routes
-        return result.removedDates.some(d => key.startsWith(`${routeLabel}|${d}|`));
-      };
-
-      for (const key of Object.keys(state.flights || {})) {
-        if (shouldCleanKey(key)) { delete state.flights[key]; cleaned++; }
-      }
-      // Also clean lastChecked for consistency
-      for (const key of Object.keys(state.lastChecked || {})) {
-        if (shouldCleanKey(key)) { delete state.lastChecked[key]; }
-      }
-      if (cleaned > 0) fs.writeFileSync(stateFile, JSON.stringify(state, null, 2));
-    } catch {
-      // state.json unreadable — proceed with just the route removal reply
-    }
+    const cleaned = result.clearedFlights;
 
     const cleanedMsg = cleaned > 0 ? ` Cleared ${cleaned} cached flights.` : '';
     const cabinLabels = { 'premium-economy': 'Premium Economy', 'economy': 'Economy', 'business': 'Business' };

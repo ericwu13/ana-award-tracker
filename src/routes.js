@@ -14,8 +14,10 @@
 const fs = require('fs');
 const path = require('path');
 
-const ROUTES_FILE = path.join(__dirname, '..', 'data', 'routes.json');
-const STATE_FILE = path.join(__dirname, '..', 'data', 'state.json');
+// ANA_DATA_DIR lets tests point the filesystem-aware functions at a scratch dir.
+const DATA_DIR = process.env.ANA_DATA_DIR || path.join(__dirname, '..', 'data');
+const ROUTES_FILE = path.join(DATA_DIR, 'routes.json');
+const STATE_FILE = path.join(DATA_DIR, 'state.json');
 
 // Canonical cabin definitions. Keys are the kebab-case strings stored in routes.json.
 const CABIN_KEYS = {
@@ -895,4 +897,5 @@ module.exports = {
   expandCabinKeyword, sortCabinKeys, migrateRoute,
   addDatesWithCabins, removeDatesFromRoute, groupDatesByCabinSignature,
   CABIN_KEYS, CABIN_ORDER,
+  DATA_DIR, ROUTES_FILE, STATE_FILE,
 };

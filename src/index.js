@@ -20,6 +20,7 @@ if (!ANA_USERNAME || !ANA_PASSWORD) {
 }
 
 const { loadRoutes } = require('./routes');
+const { recordEvent } = require('./events');
 
 const STATE_FILE = path.join(__dirname, '..', 'data', 'state.json');
 const ROUTES = loadRoutes();
@@ -166,6 +167,7 @@ async function processOneResult({ route, cabin, date, results }, state) {
         miles: result.miles ?? null,
         taxUsd: result.taxUsd ?? null,
       };
+      recordEvent('new', state.flights[key]);
     } else if (prev.status === 'waitlist' && currentStatus === 'confirmed') {
       // UPGRADE — alert only if not flip-flopping (cooldown: 6h).
       // ANA's yield system can toggle availability between searches, causing
@@ -180,6 +182,7 @@ async function processOneResult({ route, cabin, date, results }, state) {
         const sent = await notifyAvailability(date, { ...result, _statusChange: 'UPGRADED from waitlist' }, route);
         if (sent) alertsSent++;
         prev.lastUpgradeAlert = new Date(now).toISOString();
+        recordEvent('upgraded', { ...prev, status: 'confirmed', miles: result.miles ?? prev.miles, taxUsd: result.taxUsd ?? prev.taxUsd });
       } else {
         const agoMin = Math.round((now - lastAlert) / 60000);
         console.log(`[Main] ⏳ Suppressed flip-flop: ${route} ${date} ${result.flightNumber} waitlist → confirmed (last alert ${agoMin}min ago)`);
@@ -202,6 +205,7 @@ async function processOneResult({ route, cabin, date, results }, state) {
         const delta = result.miles - prev.miles;
         const sign = delta > 0 ? '+' : '';
         console.log(`[Main] 💰 MILES CHANGED: ${route} ${date} ${result.flightNumber}: ${prev.miles.toLocaleString()} → ${result.miles.toLocaleString()} (${sign}${delta.toLocaleString()})`);
+        recordEvent('miles_changed', { ...prev, miles: result.miles }, { prevMiles: prev.miles });
       }
       if (result.taxUsd != null && prev.taxUsd != null && result.taxUsd !== prev.taxUsd) {
         const delta = result.taxUsd - prev.taxUsd;
@@ -264,6 +268,7 @@ async function detectGoneFlights(allResults, state, seenKeys) {
         if (flight.taxUsd != null) costLine += ` + $${flight.taxUsd.toFixed(2)}`;
       }
       await sendAlert(`❌ **Seats gone**: ${flight.flightNumber} ${flight.route} ${flight.date}\n${flight.cabinDesc || ''} — no longer available${costLine}`);
+      recordEvent('gone', flight);
     }
     delete state.flights[key];
   }

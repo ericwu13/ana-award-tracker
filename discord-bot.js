@@ -4,12 +4,18 @@
  * Start with: node discord-bot.js (or via Task Scheduler)
  */
 require('dotenv').config();
-const { Client, GatewayIntentBits } = require('discord.js');
+// BOT_DESKTOP: re-run on the hidden desktop so the keep-alive's Chrome (and any
+// /check run spawned from here) never shows on screen. Never returns if it does.
+require('./src/bot-desktop').relaunchOnBotDesktop('[Discord]');
+
+const { Client, GatewayIntentBits, Partials } = require('discord.js');
 const { registerCommands, handleCommand } = require('./src/discord-commands');
 const { seedRoutesIfNeeded, cleanupExpiredDates } = require('./src/routes');
 const { startCookieServer } = require('./src/cookie-server');
 const { startKeepAlive } = require('./src/session-keepalive');
 const { sendAlert } = require('./src/notifier');
+const { createAgent } = require('./src/agent');
+const { attachChat } = require('./src/discord-chat');
 const { execSync, spawn } = require('child_process');
 
 // Seed routes from .env if first run
@@ -43,11 +49,11 @@ if (!token) {
 
 let isCheckRunning = false;
 
-/** Trigger an immediate search by running run-once.js */
+/** Trigger an immediate search by running run-once.js. Returns false if one it started is still running. */
 function triggerCheck() {
   if (isCheckRunning) {
     console.log('[Discord] Check already running, skipping');
-    return;
+    return false;
   }
   isCheckRunning = true;
   console.log('[Discord] Triggering immediate check...');
@@ -71,9 +77,17 @@ function triggerCheck() {
     isCheckRunning = false;
     console.error('[Discord] Check failed to start:', err.message);
   });
+  return true;
 }
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+// GuildMessages + DirectMessages are for the chat agent (src/discord-chat.js).
+// Neither is privileged: Discord includes message text for @mentions and DMs
+// without the Message Content intent. Partials.Channel is required to receive DMs.
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.DirectMessages],
+  partials: [Partials.Channel],
+});
+const chat = attachChat(client, createAgent({ triggerCheck }));
 
 client.once('ready', async () => {
   console.log(`[Discord] Bot ready: ${client.user.tag}`);
@@ -82,6 +96,14 @@ client.once('ready', async () => {
 });
 
 client.on('interactionCreate', async (interaction) => {
+  if (interaction.isButton()) {
+    try {
+      await chat.handleButton(interaction);
+    } catch (err) {
+      console.error('[Discord] Button error:', err.message);
+    }
+    return;
+  }
   if (!interaction.isChatInputCommand()) return;
   try {
     await handleCommand(interaction, triggerCheck);
