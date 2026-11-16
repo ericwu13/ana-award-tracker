@@ -17,7 +17,7 @@ const path = require('path');
 
 const { isStale, markStale } = require('./session-stale');
 const { cleanupChrome } = require('./chrome-cleanup');
-const { windowPositionArg } = require('./browser-window');
+const { windowPositionArg, BOT_CHROME_PREFS } = require('./browser-window');
 const COOKIE_PATH = path.join(__dirname, '..', 'data', 'cookies.json');
 const KEEPALIVE_INTERVAL_MS = 25 * 60 * 1000; // Every 25 minutes
 const STALE_THRESHOLD_MS = 2 * 60 * 60 * 1000; // Alert if >2 hours without refresh
@@ -67,6 +67,7 @@ async function refreshSession() {
       customConfig: {
         chromePath,
         chromiumFlags: ['--disable-backgrounding-occluded-windows'],
+        prefs: BOT_CHROME_PREFS, // no "Save password?" bubble after re-auth
       },
       connectOption: {
         // Cap CDP at 90s so wedged renderers fail fast; keep-alive runs every 25 min so a quick failure is recoverable.

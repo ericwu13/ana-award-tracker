@@ -6,7 +6,7 @@ const { connect } = require('puppeteer-real-browser');
 const fs = require('fs');
 const path = require('path');
 const { parseResults, parseFlightDetails, getPageDebugInfo } = require('./parser');
-const { windowPositionArg } = require('./browser-window');
+const { windowPositionArg, BOT_CHROME_PREFS } = require('./browser-window');
 
 const COOKIE_PATH = path.join(__dirname, '..', 'data', 'cookies.json');
 
@@ -74,6 +74,7 @@ class Session {
       customConfig: {
         chromePath,
         chromiumFlags: ['--disable-backgrounding-occluded-windows'],
+        prefs: BOT_CHROME_PREFS, // no "Save password?" bubble after login
       },
       connectOption: {
         // Cap CDP at 90s so wedged renderers fail fast and the outer loop can recover.

@@ -83,4 +83,23 @@ function windowPositionArg(role, opts) {
   return `--window-position=${x},${y}`;
 }
 
-module.exports = { parseWindowPosition, resolveWindowPosition, windowPositionArg, LEGACY, SEARCH_STAGGER_PX, MAX_ABS };
+/**
+ * Profile prefs for bot Chrome — pass as chrome-launcher `prefs` (written to
+ * Default/Preferences of the temp profile before Chrome starts).
+ *
+ * Chrome's "Save password?" bubble is its own top-level window, and Chromium
+ * repositions bubbles onto the nearest real monitor even when the window they
+ * belong to is off-screen. Every credential login (most runs) therefore parked
+ * a 462x683 popup on a monitor for the rest of the session. These prefs stop
+ * the password manager from offering at all. They are browser-UI settings, not
+ * observable from page script.
+ */
+const BOT_CHROME_PREFS = {
+  credentials_enable_service: false,
+  profile: {
+    password_manager_enabled: false,
+    password_manager_leak_detection: false,
+  },
+};
+
+module.exports = { parseWindowPosition, resolveWindowPosition, windowPositionArg, BOT_CHROME_PREFS, LEGACY, SEARCH_STAGGER_PX, MAX_ABS };

@@ -3,6 +3,11 @@
  * Designed to be called by Task Scheduler via run-check.vbs.
  * Cookie server runs in the persistent Discord bot process (discord-bot.js).
  */
+require('dotenv').config();
+// BOT_DESKTOP: re-run on the hidden desktop (never returns if it does). Must come
+// before the lock so the waiter process left behind here doesn't hold it.
+require('./src/bot-desktop').relaunchOnBotDesktop('[run-once]');
+
 const fs = require('fs');
 const path = require('path');
 const LOCK_FILE = path.join(__dirname, 'data', 'run.lock');
@@ -29,8 +34,6 @@ acquireLock();
 process.on('exit', releaseLock);
 process.on('uncaughtException', (e) => { releaseLock(); throw e; });
 process.on('SIGTERM', () => { releaseLock(); process.exit(0); });
-
-require('dotenv').config();
 
 // Load and run the main index
 require('./src/index.js');
