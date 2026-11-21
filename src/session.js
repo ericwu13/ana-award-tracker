@@ -7,6 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const { parseResults, parseFlightDetails, getPageDebugInfo } = require('./parser');
 const { windowPositionArg } = require('./browser-window');
+const { applyResourceBlocking } = require('./browser-load');
 
 const COOKIE_PATH = path.join(__dirname, '..', 'data', 'cookies.json');
 
@@ -68,7 +69,12 @@ class Session {
     this.log('Launching browser...');
     const { browser, page } = await connect({
       headless: false,
-      turnstile: true,
+      // Cloudflare Turnstile auto-solver OFF: ANA is behind Akamai, not
+      // Cloudflare. With it on, puppeteer-real-browser polls every second for the
+      // page's lifetime — getBoundingClientRect + getComputedStyle on EVERY <div>
+      // — and mouse-clicks any empty 290-310px-wide div it finds, i.e. teleporting
+      // clicks on random ANA elements that break the bezier cursor trail.
+      turnstile: false,
       disableXvfb: true,
       args,
       customConfig: {
@@ -90,6 +96,9 @@ class Session {
 
     this.browser = browser;
     this.page = page;
+
+    // BOT_BLOCK_RESOURCES (images/fonts/media) — off unless configured.
+    await applyResourceBlocking(page, { log: msg => this.log(msg) });
 
     // Track virtual mouse position so _moveTo can draw a continuous bezier path
     // from one element to the next instead of teleporting. Akamai's behavioural

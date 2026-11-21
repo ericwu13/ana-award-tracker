@@ -18,6 +18,8 @@ const path = require('path');
 const { isStale, markStale } = require('./session-stale');
 const { cleanupChrome } = require('./chrome-cleanup');
 const { windowPositionArg } = require('./browser-window');
+const { applyResourceBlocking } = require('./browser-load');
+const { keepAliveSkipReason } = require('./keepalive-gate');
 const COOKIE_PATH = path.join(__dirname, '..', 'data', 'cookies.json');
 const KEEPALIVE_INTERVAL_MS = 25 * 60 * 1000; // Every 25 minutes
 const STALE_THRESHOLD_MS = 2 * 60 * 60 * 1000; // Alert if >2 hours without refresh
@@ -37,6 +39,13 @@ async function refreshSession() {
   }
   if (isStale()) {
     console.log('[KeepAlive] Session is stale — waiting for fresh cookies from Chrome. Not retrying.');
+    return;
+  }
+  // A search cycle running now (or one that just succeeded) already refreshed
+  // the aswbe-i session with these cookies — don't launch another Chrome.
+  const skipReason = keepAliveSkipReason({ lastKeepAliveSuccess: lastSuccessTime });
+  if (skipReason) {
+    console.log(`[KeepAlive] Skipping — ${skipReason}`);
     return;
   }
   isRefreshing = true;
@@ -59,7 +68,9 @@ async function refreshSession() {
     const chromePath = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
     const result = await connect({
       headless: false,
-      turnstile: true,
+      // ANA uses Akamai, not Cloudflare — the Turnstile solver only burns CPU
+      // and fires stray clicks. See session.js launch().
+      turnstile: false,
       disableXvfb: true,
       // Off-screen placement (BOT_WINDOW_POSITION). `--start-minimized` used to be
       // here too, but it is not a Chrome switch and was ignored.
@@ -76,6 +87,8 @@ async function refreshSession() {
 
     browser = result.browser;
     const page = result.page;
+
+    await applyResourceBlocking(page, { log: msg => console.log(`[KeepAlive] ${msg}`) });
 
     // Load cookies
     await page.setCookie(...cookies);

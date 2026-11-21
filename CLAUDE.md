@@ -17,6 +17,7 @@ node test/parser.test.js          # per-flight miles extraction from ANA HTML
 node test/gone-detection.test.js  # GONE grace period
 node test/chrome-cleanup.test.js  # orphaned bot-Chrome classification
 node test/browser-window.test.js  # BOT_WINDOW_POSITION resolution
+node test/load-reduction.test.js  # BOT_BLOCK_RESOURCES, keep-alive skip gate, log pruning
 ```
 
 No test framework — uses built-in `assert`. Exits with code 1 on failure.
@@ -41,6 +42,8 @@ ANA uses Akamai Bot Manager. The "heavy traffic" / "request cannot be accepted" 
 Safety rules baked in — keep them: if the PowerShell listing fails, nothing is killed or swept (an empty list ≠ no bot browsers); the kill pipeline re-checks name + command line so a reused pid can't be hit; helpers whose browser pid is still alive are never killed even if its command line is unreadable; stale `%TEMP%\lighthouse.*` dirs are only swept once >10 min old (chrome-launcher mkdirs before Chrome shows up in the process list). `--disable-backgrounding-occluded-windows` is already in chrome-launcher's DEFAULT_FLAGS; `customConfig.chromiumFlags` is ignored by chrome-launcher, and `customConfig.chromeFlags` would *replace* the whole flag list — don't use either.
 
 ### Hiding bot windows
+Turnstile: `turnstile: false` in both `session.js` and `session-keepalive.js`. ANA is Akamai, not Cloudflare; puppeteer-real-browser's Turnstile solver polls every `<div>` each second and clicks stray 290–310 px divs, which costs CPU and breaks the bezier cursor trail. Don't turn it back on.
+
 Three things that do NOT work, with the reason, so nobody retries them:
 - **Headless / non-interactive session** (Task Scheduler "run whether user is logged on or not"): Akamai fingerprints the WebGL renderer and screen metrics; the cookies come from the user's real Chrome on the same GPU, so a SwiftShader renderer is a mismatch.
 - **Minimizing** (CDP `Browser.setWindowBounds windowState=minimized`): on Windows a minimized window is HIDDEN to the renderer and BeginMainFrame stops — puppeteer `click()` (IntersectionObserver) never resolves (90 s timeout), `waitForFunction`'s default rAF polling evaluates once, `mouse.move` waits on a 5 s fallback per step. Breaks searches and the keep-alive re-auth path.
@@ -112,4 +115,8 @@ Key `.env` settings (see `docs/cookie-pipeline.md` for full list):
 - `ALERT_WAITLIST=true`
 - `GONE_GRACE_MISSES=3` — consecutive missed cycles before a flight is treated as gone and removed from state. Guards against ANA's waitlist availability oscillating on/off between cycles, which otherwise deletes + re-alerts the same seat as "new" every pull. Do not set to 1.
 - `BOT_WINDOW_POSITION=-20000,0` — where bot Chrome windows go; unset keeps the legacy positions. See "Hiding bot windows".
+- `KEEPALIVE_SKIP_AFTER_RUN_MIN=30` — keep-alive skips its tick while `run.lock` is held by a live search, or if the last search cycle had `checked > 0` within this many minutes (the search already refreshed the session). 0 = never skip.
+- `KEEPALIVE_MAX_SKIP_MIN=60` — backstop for the above: never skip if the last keep-alive success is older than this (or none yet since the bot started). Search sessions don't write rotated cookies back to `cookies.json`; only the keep-alive does, so it must still run regularly when the Chrome extension is down. A `run.lock` older than 2 h is ignored (hard-killed run-once + Windows PID reuse).
+- `BOT_BLOCK_RESOURCES=` — optional comma list `images,fonts,media` blocked in bot Chrome via CDP `Fetch` by resource type (never scripts/XHR/documents/CSS). Default off; Akamai impact unverified.
+- `LOG_RETENTION_DAYS=30` — delete `data/logs/run-*.log` and `data/form-error-*` older than this at the end of each cycle. 0 = keep all.
 - `STALE_FLIGHT_DAYS=30` — prune cached flights not seen in this many days (backstop for combos that stop being searched, e.g. perpetually rate-limited)
