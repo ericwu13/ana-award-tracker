@@ -1,28 +1,24 @@
 /**
  * Scan-then-confirm planner (pure, no I/O — see test/scan-plan.test.js).
  *
- * Given every (route, date, cabin) task the routes ask for and a seats.aero
- * scan, decide which tasks the ANA scraper must still run this cycle. The goal
- * is fewer ANA searches (= fewer Akamai blocks) WITHOUT going blind on space
- * that only ANA can see.
+ * seats.aero has NO ANA Mileage Club source: it only sees what Star Alliance
+ * releases to partner programs (Aeroplan, United, ...). ANA gives its own
+ * members more space (plus waitlist and premium economy) than it releases to
+ * partners, so "seats.aero saw nothing" does NOT mean "ANA has nothing".
+ * The scan therefore PRIORITISES ANA searches by default — it never drops one:
+ * hits go to the front of the queue so they are checked before Akamai starts
+ * throttling a session.
  *
- * A task is sent to ANA when ANY of these hold (first match = reason):
- *   untrusted-cabin  the cabin isn't in SCAN_TRUST_CABINS — seats.aero can't
- *                    vouch for it (default: premium-economy, because ANA is
- *                    believed not to release PE award space to partner
- *                    programs — ⚠️ GUESS, verify by comparing a few cycles)
+ * Each task gets a reason (first match wins):
+ *   untrusted-cabin  cabin not in SCAN_TRUST_CABINS — scan says nothing about it
  *   scan-failed      seats.aero errored / wasn't asked for this window
- *   scan-hit         seats.aero shows space on a Star Alliance carrier
- *   tracked          state.flights already holds a seat for this combo — keep
- *                    re-checking so GONE detection, upgrades, miles changes
- *                    still work
- *   due              not ANA-checked for SCAN_FULL_RECHECK_HOURS (default 24).
- *                    Safety net: ANA's own-member inventory and waitlist are
- *                    invisible to seats.aero (⚠️ GUESS that the gap is real
- *                    and material — that's what this net is for). Capped at
- *                    SCAN_MAX_DUE_PER_CYCLE, oldest first, so the backlog is
- *                    spread out instead of hitting ANA all at once.
- * Otherwise the task is skipped with reason `scan-miss`.
+ *   scan-hit         seats.aero shows partner space on a Star Alliance carrier
+ *                    → priority: searched first
+ *   tracked          state.flights already holds a seat for this combo
+ *   scan-miss        none of the above. Still searched, UNLESS the opt-in
+ *                    SCAN_MISS_RECHECK_HOURS > 0 and ANA checked it more
+ *                    recently than that → skipped this cycle (trades some risk
+ *                    of missing ANA-member-only space for fewer ANA requests).
  */
 
 function taskKey(t) {
@@ -32,8 +28,7 @@ function taskKey(t) {
 function planConfirmations(tasks, scan, state = {}, opts = {}) {
   const {
     trustCabins = ['economy', 'business'],
-    fullRecheckHours = 24,
-    maxDuePerCycle = 4,
+    missRecheckHours = 0, // 0 = never skip (default)
     now = Date.now(),
   } = opts;
   const trust = new Set(trustCabins);
@@ -55,33 +50,28 @@ function planConfirmations(tasks, scan, state = {}, opts = {}) {
     if (f.route && f.date && f.searchedCabin) tracked.add(`${f.route}|${f.date}|${f.searchedCabin}`);
   }
 
+  const missMs = missRecheckHours * 3600000;
   const decisions = [];
-  const dueCandidates = [];
-  const recheckMs = fullRecheckHours * 3600000;
   for (const t of tasks) {
     const sk = `${t.from}|${t.to}|${t.date}|${t.cabinKey}`;
-    const d = { task: t, confirm: true, reason: null, hits: hits.get(sk) || [] };
+    const d = { task: t, confirm: true, priority: false, reason: null, hits: hits.get(sk) || [] };
     if (!trust.has(t.cabinKey)) d.reason = 'untrusted-cabin';
     else if (!scanned.has(sk)) d.reason = 'scan-failed';
-    else if (d.hits.length > 0) d.reason = 'scan-hit';
+    else if (d.hits.length > 0) { d.reason = 'scan-hit'; d.priority = true; }
     else if (tracked.has(taskKey(t))) d.reason = 'tracked';
     else {
-      const last = lastChecked[taskKey(t)] || 0;
-      if (now - last >= recheckMs) dueCandidates.push({ d, last });
-      d.confirm = false;
       d.reason = 'scan-miss';
+      const last = lastChecked[taskKey(t)] || 0;
+      if (missMs > 0 && now - last < missMs) d.confirm = false;
     }
     decisions.push(d);
   }
 
-  dueCandidates.sort((a, b) => a.last - b.last);
-  for (const { d } of dueCandidates.slice(0, Math.max(0, maxDuePerCycle))) {
-    d.confirm = true;
-    d.reason = 'due';
-  }
-
   const counts = {};
-  for (const d of decisions) counts[d.reason] = (counts[d.reason] || 0) + 1;
+  for (const d of decisions) {
+    const k = d.confirm ? d.reason : `${d.reason}-skipped`;
+    counts[k] = (counts[k] || 0) + 1;
+  }
   return {
     confirm: decisions.filter(d => d.confirm),
     skip: decisions.filter(d => !d.confirm),
@@ -89,13 +79,23 @@ function planConfirmations(tasks, scan, state = {}, opts = {}) {
   };
 }
 
+/**
+ * The lastChecked map runParallel sorts by (oldest first). Returns a copy with
+ * priority tasks forced to the very front; the real state.lastChecked is
+ * untouched.
+ */
+function priorityLastChecked(lastChecked, plan) {
+  const out = { ...(lastChecked || {}) };
+  for (const d of plan.confirm) if (d.priority) out[taskKey(d.task)] = -1;
+  return out;
+}
+
 function strategyConfig() {
   return {
     strategy: process.env.SEARCH_STRATEGY || 'ana-only', // 'ana-only' | 'scan-then-confirm'
     trustCabins: (process.env.SCAN_TRUST_CABINS || 'economy,business').split(',').map(s => s.trim()).filter(Boolean),
-    fullRecheckHours: parseFloat(process.env.SCAN_FULL_RECHECK_HOURS || '24'),
-    maxDuePerCycle: parseInt(process.env.SCAN_MAX_DUE_PER_CYCLE || '4'),
+    missRecheckHours: parseFloat(process.env.SCAN_MISS_RECHECK_HOURS || '0'),
   };
 }
 
-module.exports = { planConfirmations, strategyConfig, taskKey };
+module.exports = { planConfirmations, priorityLastChecked, strategyConfig, taskKey };

@@ -12,7 +12,7 @@ delete process.env.SEATS_AERO_AIRLINES;
 
 const assert = require('assert');
 const seatsAero = require('../src/sources/seats-aero');
-const { planConfirmations } = require('../src/scan-plan');
+const { planConfirmations, priorityLastChecked } = require('../src/scan-plan');
 const { tagResults } = require('../src/sources');
 
 let passed = 0, failed = 0;
@@ -98,45 +98,48 @@ const task = (date, cabinKey = 'business', o = {}) => ({
   const hit = (date, cabinKey = 'business') => ({ from: 'HND', to: 'SFO', date, cabinKey, available: true, program: 'aeroplan', miles: 75000, airlines: ['NH'] });
   const recent = { 'HND→SFO|2027-03-01|Business': NOW - 3600000, 'HND→SFO|2027-03-02|Business': NOW - 3600000 };
 
-  await test('scan hit → ANA; scan miss checked recently → skipped', () => {
+  await test('default: scan miss is still searched (seats.aero cannot see ANA-member space)', () => {
     const ts = [task('2027-03-01'), task('2027-03-02')];
     const p = planConfirmations(ts, scanOf(ts, [hit('2027-03-01')]), { lastChecked: recent }, { now: NOW });
-    assert.deepStrictEqual(p.confirm.map(d => [d.task.date, d.reason]), [['2027-03-01', 'scan-hit']]);
-    assert.deepStrictEqual(p.skip.map(d => [d.task.date, d.reason]), [['2027-03-02', 'scan-miss']]);
+    assert.deepStrictEqual(p.confirm.map(d => [d.task.date, d.reason, d.priority]),
+      [['2027-03-01', 'scan-hit', true], ['2027-03-02', 'scan-miss', false]]);
+    assert.strictEqual(p.skip.length, 0);
   });
-  await test('premium-economy is untrusted by default → always ANA', () => {
+  await test('opt-in SCAN_MISS_RECHECK_HOURS throttles only recently-checked misses', () => {
+    const ts = [task('2027-03-02'), task('2027-03-03')]; // 03-03 never checked
+    const p = planConfirmations(ts, scanOf(ts, []), { lastChecked: recent }, { now: NOW, missRecheckHours: 6 });
+    assert.deepStrictEqual(p.skip.map(d => d.task.date), ['2027-03-02']);
+    assert.deepStrictEqual(p.confirm.map(d => d.task.date), ['2027-03-03']);
+    assert.strictEqual(p.counts['scan-miss-skipped'], 1);
+  });
+  await test('premium-economy is untrusted by default → searched, no priority', () => {
     const ts = [task('2027-03-01', 'premium-economy')];
-    const p = planConfirmations(ts, scanOf(ts, []), {}, { now: NOW });
+    const p = planConfirmations(ts, scanOf(ts, []), {}, { now: NOW, missRecheckHours: 6 });
     assert.strictEqual(p.confirm[0].reason, 'untrusted-cabin');
   });
-  await test('window that failed to scan → ANA (fallback = old behaviour)', () => {
+  await test('window that failed to scan → searched (fallback = old behaviour)', () => {
     const ts = [task('2027-03-01')];
-    const p = planConfirmations(ts, { entries: [], scannedGroups: [] }, { lastChecked: recent }, { now: NOW });
+    const p = planConfirmations(ts, { entries: [], scannedGroups: [] }, { lastChecked: recent }, { now: NOW, missRecheckHours: 6 });
     assert.strictEqual(p.confirm[0].reason, 'scan-failed');
   });
-  await test('combo with a tracked seat keeps going to ANA (GONE detection)', () => {
+  await test('combo with a tracked seat is never throttled (GONE detection)', () => {
     const ts = [task('2027-03-02')];
     const state = { lastChecked: recent, flights: { k: { route: 'HND→SFO', date: '2027-03-02', searchedCabin: 'Business' } } };
-    const p = planConfirmations(ts, scanOf(ts, []), state, { now: NOW });
+    const p = planConfirmations(ts, scanOf(ts, []), state, { now: NOW, missRecheckHours: 6 });
     assert.strictEqual(p.confirm[0].reason, 'tracked');
-  });
-  await test('due safety net: oldest first, capped per cycle', () => {
-    const ts = ['2027-03-01', '2027-03-02', '2027-03-03', '2027-03-04'].map(d => task(d));
-    const lastChecked = {
-      'HND→SFO|2027-03-01|Business': NOW - 30 * 3600000,
-      'HND→SFO|2027-03-02|Business': NOW - 1 * 3600000, // recent → never due
-      'HND→SFO|2027-03-03|Business': NOW - 50 * 3600000,
-      // 03-04 never checked → oldest
-    };
-    const p = planConfirmations(ts, scanOf(ts, []), { lastChecked }, { now: NOW, maxDuePerCycle: 2 });
-    assert.deepStrictEqual(p.confirm.map(d => d.task.date).sort(), ['2027-03-03', '2027-03-04']);
-    assert.ok(p.confirm.every(d => d.reason === 'due'));
-    assert.strictEqual(p.counts['scan-miss'], 2);
   });
   await test('unavailable scan entries are not hits', () => {
     const ts = [task('2027-03-01')];
     const p = planConfirmations(ts, scanOf(ts, [{ ...hit('2027-03-01'), available: false }]), { lastChecked: recent }, { now: NOW });
-    assert.strictEqual(p.skip[0].reason, 'scan-miss');
+    assert.strictEqual(p.confirm[0].reason, 'scan-miss');
+  });
+  await test('priorityLastChecked puts hits first without touching real state', () => {
+    const ts = [task('2027-03-01'), task('2027-03-02')];
+    const p = planConfirmations(ts, scanOf(ts, [hit('2027-03-02')]), { lastChecked: recent }, { now: NOW });
+    const order = priorityLastChecked(recent, p);
+    assert.strictEqual(order['HND→SFO|2027-03-02|Business'], -1);
+    assert.strictEqual(order['HND→SFO|2027-03-01|Business'], recent['HND→SFO|2027-03-01|Business']);
+    assert.notStrictEqual(recent['HND→SFO|2027-03-02|Business'], -1);
   });
 
   console.log('\ntagResults');

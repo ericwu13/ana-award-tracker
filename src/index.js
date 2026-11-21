@@ -7,7 +7,7 @@ const { cleanupChrome } = require('./chrome-cleanup');
 const { initDiscord, destroyDiscord, notifyAvailability, sendAlert, sendStatusUpdate } = require('./notifier');
 const { tagResults, SOURCE_ANA, PROGRAM_ANA } = require('./sources');
 const seatsAero = require('./sources/seats-aero');
-const { planConfirmations, strategyConfig } = require('./scan-plan');
+const { planConfirmations, priorityLastChecked, strategyConfig } = require('./scan-plan');
 
 const { ANA_USERNAME, ANA_PASSWORD } = process.env;
 const MAX_SESSIONS = parseInt(process.env.MAX_SESSIONS || '2');
@@ -352,12 +352,13 @@ async function main() {
       }
     }
 
-    // Scan-then-confirm: let seats.aero sweep every task first (no browser, no
-    // Akamai) and only send ANA the tasks worth confirming. Any scan failure
-    // falls back to ANA for the affected tasks, so the worst case equals the
-    // old ana-only behaviour. Default strategy is still 'ana-only'.
+    // Scan-then-confirm: seats.aero sweeps every task first (no browser, no
+    // Akamai) and its hits jump to the front of the ANA queue. seats.aero can't
+    // see ANA-member-only space, so misses are still searched unless the opt-in
+    // SCAN_MISS_RECHECK_HOURS throttles them. Default strategy is 'ana-only'.
     const strategy = strategyConfig();
     let scanSkippedTasks = [];
+    let searchOrder = null; // lastChecked copy with seats.aero hits forced first
     if (strategy.strategy === 'scan-then-confirm' && tasks.length > 0) {
       if (!seatsAero.enabled()) {
         console.log('[Main] SEARCH_STRATEGY=scan-then-confirm but SEATS_AERO_API_KEY is unset — using ANA for everything');
@@ -371,6 +372,7 @@ async function main() {
           console.log(`[Scan] 🔎 hit ${d.task.from}→${d.task.to} ${d.task.date} ${d.task.cabinKey}: ${h}`);
         }
         scanSkippedTasks = plan.skip.map(d => d.task);
+        searchOrder = priorityLastChecked(state.lastChecked, plan);
         tasks = plan.confirm.map(d => d.task);
         state.lastScan = {
           timestamp: new Date().toISOString(),
@@ -429,7 +431,7 @@ async function main() {
       for (const k of seenKeys) allSeenKeys.add(k);
     };
 
-    const allResults = await runParallel(jobs, MAX_SESSIONS, state.lastChecked, onResult);
+    const allResults = await runParallel(jobs, MAX_SESSIONS, searchOrder || state.lastChecked, onResult);
     const elapsed = Math.round((Date.now() - startTime) / 1000);
 
     // Mark each task that was actually attempted
@@ -498,8 +500,8 @@ async function main() {
       timedOut: timedOutCount,
       formError: formErrorCount,
       skipped: skippedCount,
-      // Tasks seats.aero ruled out this cycle (not sent to ANA). Not a failure:
-      // with scan-then-confirm, checked can legitimately be 0 when nothing hit.
+      // seats.aero-miss tasks throttled this cycle (only when the opt-in
+      // SCAN_MISS_RECHECK_HOURS > 0). Not a failure.
       scanSkipped: scanSkippedTasks.length,
       sessionsRateLimited: rateLimitedSessions.length,
       skippedSample: skippedTasks.slice(0, 20),
@@ -538,7 +540,7 @@ async function main() {
     if (formErrorCount > 0) coverageMsg += `, ${formErrorCount} form-error`;
     if (skippedCount > 0) coverageMsg += `, ${skippedCount} skipped`;
     if (skippedDueToConfirmed > 0) coverageMsg += `, ${skippedDueToConfirmed} skipped (already confirmed)`;
-    if (scanSkippedTasks.length > 0) coverageMsg += `, ${scanSkippedTasks.length} ruled out by seats.aero`;
+    if (scanSkippedTasks.length > 0) coverageMsg += `, ${scanSkippedTasks.length} throttled (seats.aero miss)`;
     if (rateLimitedSessions.length > 0) {
       coverageMsg += ` (${rateLimitedSessions.length} session${rateLimitedSessions.length > 1 ? 's' : ''} hit ANA throttle)`;
     }
