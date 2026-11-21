@@ -134,8 +134,59 @@ async function notifyAvailability(date, result, routeLabel) {
   return sent;
 }
 
+
+const CABIN_LABEL = { 'economy': 'Economy', 'premium-economy': 'Premium Economy', 'business': 'Business', 'first': 'First' };
+
+/** Human name for a seats.aero program id (unknown ids pass through). */
+const PROGRAM_LABEL = {
+  aeroplan: 'Aeroplan', united: 'United MileagePlus', lifemiles: 'LifeMiles', singapore: 'KrisFlyer',
+  turkish: 'Turkish Miles&Smiles', lufthansa: 'Miles & More', ethiopian: 'ShebaMiles', eurobonus: 'SAS EuroBonus',
+  copa: 'Copa ConnectMiles', virginatlantic: 'Virgin Atlantic', flyingblue: 'Flying Blue', alaska: 'Alaska Mileage Plan',
+  american: 'AAdvantage', delta: 'Delta SkyMiles', qantas: 'Qantas', velocity: 'Velocity', emirates: 'Emirates Skywards',
+  etihad: 'Etihad Guest', qatar: 'Qatar Privilege Club', jetblue: 'JetBlue TrueBlue', finnair: 'Finnair Plus',
+  smiles: 'Smiles', azul: 'Azul', aeromexico: 'Aeromexico', saudia: 'Saudia AlFursan',
+};
+
+/**
+ * Pure: build the Discord embed for one seats.aero alert group
+ * (one route + date + cabin, every qualifying program, cheapest first).
+ */
+function buildSeatsAeroEmbed(group) {
+  const [from, to] = group.route.split('→');
+  const lines = group.items.map(({ entry: e, reason, previousMiles }) => {
+    const name = PROGRAM_LABEL[e.program] || e.program;
+    let cost = `${e.miles.toLocaleString('en-US')} mi`;
+    if (Number.isFinite(e.taxes) && (!e.taxesCurrency || e.taxesCurrency === 'USD')) cost += ` + $${(e.taxes / 100).toFixed(2)}`;
+    const bits = [];
+    if (e.airlines && e.airlines.length) bits.push(e.airlines.join('/'));
+    if (e.direct === true) bits.push('direct'); else if (e.direct === false) bits.push('connecting');
+    if (e.seats) bits.push(`${e.seats} seat${e.seats > 1 ? 's' : ''}`);
+    const tag = reason === 'price-drop' && previousMiles ? ` ⬇️ was ${previousMiles.toLocaleString('en-US')}` : '';
+    return `**${name}** — ${cost}${bits.length ? ` · ${bits.join(' · ')}` : ''}${tag}`;
+  });
+  const anyDrop = group.items.some(i => i.reason === 'price-drop');
+  return {
+    title: `💺 ${CABIN_LABEL[group.cabinKey] || group.cabinKey} saver — ${from} → ${to}`,
+    color: anyDrop ? 0x3399FF : 0x00B0F4,
+    description: lines.join('\n'),
+    fields: [
+      { name: 'Date', value: group.date, inline: true },
+      { name: 'Source', value: 'seats.aero (cached)', inline: true },
+    ],
+    footer: { text: 'Book with the listed program. Cached data: check the airline site before moving points.' },
+    timestamp: new Date().toISOString(),
+  };
+}
+
+/** Send one seats.aero alert group to the alert channel (same channel as ANA). */
+async function notifySeatsAero(group) {
+  const sent = await sendDiscord(process.env.DISCORD_ALERT_CHANNEL_ID, { embeds: [buildSeatsAeroEmbed(group)] });
+  if (sent) console.log(`[Notifier] seats.aero alert sent: ${group.route} ${group.date} ${group.cabinKey}`);
+  return sent;
+}
+
 // No-op functions for backward compatibility (index.js may call these)
 async function initDiscord() { return true; }
 async function destroyDiscord() {}
 
-module.exports = { initDiscord, destroyDiscord, sendAlert, notifyAvailability, sendStatusUpdate };
+module.exports = { initDiscord, destroyDiscord, sendAlert, notifyAvailability, sendStatusUpdate, notifySeatsAero, buildSeatsAeroEmbed };

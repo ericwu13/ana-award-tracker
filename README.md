@@ -1,6 +1,9 @@
 # ANA Award Tracker
 
-Monitors ANA Mileage Club award seat availability for configurable routes and dates. Sends Discord alerts when confirmed seats appear.
+Monitors award seat availability for configurable routes and dates and sends Discord alerts. Two independent sources:
+
+- **ANA website** (puppeteer, your ANA login): ANA-operated flights as ANA members see them, including premium economy and waitlist.
+- **seats.aero Partner API** (optional, plain HTTPS): saver seats across 20+ mileage programs (Aeroplan, United, LifeMiles, KrisFlyer, ...). It has no ANA Mileage Club source, so it cannot tell you what ANA releases to its own members.
 
 ## Architecture
 
@@ -12,6 +15,9 @@ ANADiscordBot (persistent, starts at login)
 
 ANAAwardTracker (Task Scheduler, every 60 min)
   └── run-once.js → 2 parallel browser sessions → Discord alerts
+
+ANASeatsAero (Task Scheduler, every 30 min, optional)
+  └── run-seats.js → seats.aero cached search → saver filter → Discord alerts
 
 Chrome Extension (content script on *.ana.co.jp)
   ├── Pushes cookies to bot every 5 min
@@ -40,6 +46,7 @@ Fill in:
 - `DISCORD_ALERT_CHANNEL_ID` — Channel for award alerts
 - `DISCORD_STATUS_CHANNEL_ID` — Channel for status updates
 - `ROUTES` — Routes to track (see format below)
+- `SEATS_AERO_API_KEY` — optional seats.aero Partner API key (seats.aero Pro). Unset = seats.aero off
 
 ### 3. Install Chrome extension
 
@@ -66,7 +73,15 @@ $action = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument 'run-discord.
 $trigger = New-ScheduledTaskTrigger -AtLogOn
 $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Days 365) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
 Register-ScheduledTask -TaskName 'ANADiscordBot' -Action $action -Trigger $trigger -Settings $settings
+
+# seats.aero scan — every 30 minutes (optional; needs SEATS_AERO_API_KEY)
+$action = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument 'run-seats.vbs' -WorkingDirectory 'C:\path\to\ana-award-tracker'
+$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 30)
+$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 10) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+Register-ScheduledTask -TaskName 'ANASeatsAero' -Action $action -Trigger $trigger -Settings $settings
 ```
+
+Before relying on seats.aero alerts, run `node scripts/seats-aero-sample.js` once. It saves one real API response to `data/seats-aero-sample.json` (the key is never written) so the field mapping can be checked.
 
 ## Routes Configuration
 
@@ -90,10 +105,10 @@ Or use Discord slash commands:
 
 | Command | Description |
 |---------|-------------|
-| `/track <from> <to> <date>` | Add route+date (YYYY-MM-DD or YYYY-MM for whole month) |
+| `/track <from> <to> <date>` | Add route+date (YYYY-MM-DD or YYYY-MM for whole month). Optional `source:` (both / ana / seats.aero), `programs:` (e.g. `aeroplan,united`), `max-miles:`, `direct-only:` |
 | `/untrack <from> <to> [date]` | Remove route or date (also clears cached data) |
 | `/routes` | List all tracked routes |
-| `/status` | Availability summary table (Economy/Business columns) |
+| `/status` | Availability summary table, plus seats.aero saver seats and API usage |
 | `/flights <from> <to> <class> <date>` | Detailed flight list for a route |
 | `/check` | Trigger immediate search |
 | `/alerts clear` | Reset alert history |
@@ -118,6 +133,14 @@ When the session eventually expires, the bot sends a Discord alert asking you to
 | `MAX_LAYOVER_HOURS` | `30` | Skip layovers longer than this |
 | `ALERT_WAITLIST` | `true` | Alert on waitlisted flights |
 | `COOKIE_SERVER_PORT` | `9444` | Port for cookie receiver |
+| `SEATS_AERO_API_KEY` | — | Enables seats.aero tracking |
+| `SEATS_AERO_INTERVAL_MIN` | `30` | Minimum minutes between seats.aero scans |
+| `SEATS_AERO_DAILY_BUDGET` | `900` | API calls per UTC day; the interval stretches to stay under it (seats.aero allows ~1,000) |
+| `SEATS_AERO_CAP_Y/W/J/F` | `40000/60000/85000/110000` | Price ceiling per cabin while learning saver prices |
+| `SEATS_AERO_SAVER_MARGIN` | `0.10` | Alert when price ≤ 30-day low × (1 + margin) |
+| `SEATS_AERO_LEARN_DAYS` | `7` | Days of price history before the cap is relaxed |
+| `SEATS_AERO_HARD_CAP_MULT` | `1.5` | After learning, never alert above cap × this |
+| `SEATS_AERO_GRACE_MISSES` | `3` | Scans a seat must be missing before it is forgotten |
 
 ## Files
 
@@ -135,6 +158,9 @@ cookie-exporter/      — Chrome extension (MV3)
 discord-bot.js        — Persistent Discord bot process
 run-once.js           — Single search run (for Task Scheduler)
 run-check.vbs         — Silent launcher for search
+run-seats.js          — Single seats.aero scan (for Task Scheduler)
+run-seats.vbs         — Silent launcher for the seats.aero scan
+scripts/seats-aero-sample.js — Save one real seats.aero response for field checks
 run-discord.vbs       — Silent launcher for Discord bot
 
 data/                 — Runtime data (gitignored)

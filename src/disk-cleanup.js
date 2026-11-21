@@ -14,7 +14,7 @@ const DATA_DIR = path.join(__dirname, '..', 'data');
 const DEFAULT_RETENTION_DAYS = 30;
 
 const TARGETS = [
-  { dir: ['logs'], re: /^run-\d{4}-\d{2}-\d{2}\.log$/ },
+  { dir: ['logs'], re: /^(?:run|seats)-\d{4}-\d{2}-\d{2}\.log$/ },
   { dir: [], re: /^form-error-.+\.(?:html|png)$/ },
 ];
 
