@@ -295,7 +295,9 @@ async function main() {
     }
 
     // Reload routes after cleanup
-    const activeRoutes = reloadRoutes();
+    // Routes set to seats.aero only (/track source:seats.aero) are not ANA's job.
+    const { usesSource } = require('./routes');
+    const activeRoutes = reloadRoutes().filter(r => usesSource(r, 'ana'));
     if (activeRoutes.length === 0) {
       console.log('[Main] No routes to search.');
       return;

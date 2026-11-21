@@ -2,10 +2,11 @@
 
 ## Architecture
 
-Two independent processes share `data/cookies.json` and `data/state.json`:
+Three independent processes. The first two share `data/cookies.json` and `data/state.json`; the third shares only `data/routes.json` (read-only):
 
 - **`discord-bot.js`** — persistent (Task Scheduler at login). Runs Discord slash commands, cookie server (port 9444), and puppeteer keep-alive (every 25 min). Changes to its in-memory code require a process restart.
 - **`run-once.js`** → `src/index.js` — spawned fresh every 60 min by Task Scheduler. Single search cycle, exits. Always loads the latest code from disk — no restart needed for code changes to take effect.
+- **`run-seats.js`** → `src/seats-run.js` — seats.aero Partner API scan, spawned every 30 min by Task Scheduler (`run-seats.vbs`). No browser, no cookies, ignores `session-stale.flag`. Own lock (`data/seats.lock`) and own state (`data/seats-state.json`, atomic tmp+rename, written only here). Self-paces to `SEATS_AERO_INTERVAL_MIN` and the daily call budget, so extra ticks just exit. No-op without `SEATS_AERO_API_KEY`.
 
 The Chrome extension (`cookie-exporter/`) auto-pushes cookies every 5-10 min from the user's real Chrome browser. Its content script (`content.js`) reloads the ANA tab every 14 min to keep the server-side session alive. Full pipeline documented in `docs/cookie-pipeline.md`.
 
@@ -18,6 +19,7 @@ node test/gone-detection.test.js  # GONE grace period
 node test/chrome-cleanup.test.js  # orphaned bot-Chrome classification
 node test/browser-window.test.js  # BOT_WINDOW_POSITION resolution
 node test/load-reduction.test.js  # BOT_BLOCK_RESOURCES, keep-alive skip gate, log pruning
+node test/seats-watch.test.js     # seats.aero rows, budget pacing, saver filter, dedup, full cycle
 ```
 
 No test framework — uses built-in `assert`. Exits with code 1 on failure.
@@ -30,6 +32,7 @@ No test framework — uses built-in `assert`. Exits with code 1 on failure.
 | `data/state.json` | `{ flights: { key: flight }, lastChecked: { combo: timestamp }, lastCoverage: {...} }` | run-once.js search cycle |
 | `data/cookies.json` | Array of cookie objects | Chrome extension + keep-alive |
 | `data/session-stale.flag` | Presence = all retries halted | keep-alive on Akamai block |
+| `data/seats-state.json` | `{ entries: { 'program\|FROM→TO\|date\|cabin': {...} }, history: { 'program\|FROM→TO\|cabin': { 'YYYY-MM-DD': lowestMiles } }, usage, lastResult }` | run-seats.js only |
 
 ## Critical technical details
 
@@ -85,6 +88,22 @@ Per-date cabin tracking: each date on a route has its own cabin list. `/track` i
 
 Legacy format (dates as array + route-level `cabin` string) is auto-migrated on first load.
 
+Optional route-level fields (absent = default, set by `/track` options; `routes.js:applyRouteOptions`):
+- `sources: ['ana','seats.aero']` — default both. `index.js` skips routes without `ana`; `run-seats.js` skips routes without `seats.aero`.
+- `programs: ['aeroplan','united']` — seats.aero programs to alert on; absent = all.
+- `maxMiles: { business: 75000 }` — per-cabin ceiling; replaces the learned saver limit for that cabin.
+- `directOnly: true` — seats.aero only.
+
+`first` is not a routes.json cabin yet (ANA side has no CFF code mapped), so seats.aero first-class rows are ignored.
+
+## seats.aero (what it can and cannot tell us)
+
+seats.aero has **no ANA Mileage Club source**. Its NH rows are the space ANA releases to partner programs, a subset of what ANA members see; NH premium economy and waitlist are invisible to it. So a seats.aero miss on an NH flight never means ANA has nothing: never use seats.aero to skip or thin out ANA searches. It is a first-class source for partner programs (Aeroplan, United, ...) and partner metal (BR, UA, ...).
+
+API facts (developers.seats.aero, skill.md): `GET https://seats.aero/partnerapi/search`, header `Partner-Authorization`, comma-list `origin_airport`/`destination_airport`, `start_date`/`end_date`, `take` ≤ 1000, `sources`, `only_direct_flights`; paginate by following `https://seats.aero{moreURL}` while `hasMore`, dedupe by `ID`. Row fields `{Y,W,J,F}Available/MileageCost/RemainingSeats/Airlines/Direct`, `Date`, `Source`, `Route.OriginAirport`. **Undocumented, read defensively**: the rows array key (`data` assumed), taxes (`{X}TotalTaxes`, `TaxesCurrency`, assumed cents), freshness. All field access is in `src/sources/seats-aero.js:rowToEntries`; check against `node scripts/seats-aero-sample.js` output. Pro keys get ~1,000 calls/day, non-commercial only.
+
+Alert rule (`src/seats-watch.js`): saver only. Per program+route+cabin keep each day's lowest price for 30 days; alert when miles ≤ 30-day low × 1.1, also ≤ cabin cap while < 7 days of history, and never above cap × 1.5 afterwards. One Discord embed per route+date+cabin lists every qualifying program. Re-alerts only on a lower price. Same alert channel as ANA.
+
 ## Date input formats
 
 `parseDateInput` in `routes.js` accepts:
@@ -119,4 +138,5 @@ Key `.env` settings (see `docs/cookie-pipeline.md` for full list):
 - `KEEPALIVE_MAX_SKIP_MIN=60` — backstop for the above: never skip if the last keep-alive success is older than this (or none yet since the bot started). Search sessions don't write rotated cookies back to `cookies.json`; only the keep-alive does, so it must still run regularly when the Chrome extension is down. A `run.lock` older than 2 h is ignored (hard-killed run-once + Windows PID reuse).
 - `BOT_BLOCK_RESOURCES=` — optional comma list `images,fonts,media` blocked in bot Chrome via CDP `Fetch` by resource type (never scripts/XHR/documents/CSS). Default off; Akamai impact unverified.
 - `LOG_RETENTION_DAYS=30` — delete `data/logs/run-*.log` and `data/form-error-*` older than this at the end of each cycle. 0 = keep all.
+- `SEATS_AERO_API_KEY` — enables `run-seats.js`. Tunables: `SEATS_AERO_INTERVAL_MIN=30`, `SEATS_AERO_DAILY_BUDGET=900`, `SEATS_AERO_CAP_Y/W/J/F=40000/60000/85000/110000`, `SEATS_AERO_SAVER_MARGIN=0.10`, `SEATS_AERO_LEARN_DAYS=7`, `SEATS_AERO_HARD_CAP_MULT=1.5`, `SEATS_AERO_GRACE_MISSES=3`, `SEATS_AERO_HISTORY_DAYS=30`.
 - `STALE_FLIGHT_DAYS=30` — prune cached flights not seen in this many days (backstop for combos that stop being searched, e.g. perpetually rate-limited)

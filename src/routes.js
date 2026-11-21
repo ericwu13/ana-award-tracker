@@ -335,6 +335,71 @@ function seedRoutesIfNeeded() {
   }
 }
 
+
+// ============================================================================
+// Per-route source settings (ANA scraper vs seats.aero)
+// ============================================================================
+//
+// Optional route-level fields (absent = defaults, so old routes.json files
+// keep working unchanged):
+//   sources:    ['ana', 'seats.aero']  which trackers search this route
+//               (default both; seats.aero is a no-op without SEATS_AERO_API_KEY)
+//   programs:   ['aeroplan', 'united']  seats.aero programs to alert on
+//               (default/empty = every program)
+//   maxMiles:   { business: 75000 }     per-cabin price ceiling; overrides the
+//               learned saver threshold for that cabin
+//   directOnly: true                    seats.aero: only direct flights
+
+const SOURCE_IDS = ['ana', 'seats.aero'];
+const SOURCE_CHOICES = {
+  'both': ['ana', 'seats.aero'],
+  'ana': ['ana'],
+  'seats.aero': ['seats.aero'],
+};
+
+function routeSources(route) {
+  const s = Array.isArray(route && route.sources) ? route.sources.filter(x => SOURCE_IDS.includes(x)) : [];
+  return s.length ? s : [...SOURCE_IDS];
+}
+
+function usesSource(route, sourceId) {
+  return routeSources(route).includes(sourceId);
+}
+
+function parseProgramList(input) {
+  if (input == null) return null;
+  const list = String(input).split(/[,\s]+/).map(s => s.trim().toLowerCase()).filter(Boolean);
+  if (list.length === 0 || list.includes('all')) return [];
+  return [...new Set(list)];
+}
+
+/**
+ * Pure: merge /track options into a route. Only fields that were given are
+ * touched. `source` is a SOURCE_CHOICES key; `programs` a comma string or
+ * array ('all' clears it); `maxMiles` a number applied to `cabinKeys`
+ * (0 clears the ceiling); `directOnly` a boolean.
+ */
+function applyRouteOptions(route, { source, programs, maxMiles, cabinKeys, directOnly } = {}) {
+  if (source && SOURCE_CHOICES[source]) route.sources = [...SOURCE_CHOICES[source]];
+  if (programs != null) {
+    const list = Array.isArray(programs) ? parseProgramList(programs.join(',')) : parseProgramList(programs);
+    if (list && list.length) route.programs = list; else delete route.programs;
+  }
+  if (maxMiles != null && Number.isFinite(Number(maxMiles))) {
+    const n = Math.round(Number(maxMiles));
+    const keys = cabinKeys && cabinKeys.length ? cabinKeys : CABIN_ORDER;
+    route.maxMiles = { ...(route.maxMiles || {}) };
+    for (const k of keys) {
+      if (n > 0) route.maxMiles[k] = n; else delete route.maxMiles[k];
+    }
+    if (Object.keys(route.maxMiles).length === 0) delete route.maxMiles;
+  }
+  if (typeof directOnly === 'boolean') {
+    if (directOnly) route.directOnly = true; else delete route.directOnly;
+  }
+  return route;
+}
+
 /**
  * Add dates+cabins to a route. Creates the route if it doesn't exist.
  * @param {string} cabin - keyword: 'both' | 'all' | 'economy' | 'business' | 'premium-economy'
@@ -342,7 +407,7 @@ function seedRoutesIfNeeded() {
  * Returns { route, newlyAddedDates, updatedDates, cabinKeys, totalDates }.
  * Never destroys existing cabins on existing dates — always additive.
  */
-function addRoute(from, to, dates, cabin = 'both') {
+function addRoute(from, to, dates, cabin = 'both', options = {}) {
   const routes = loadRoutes();
   let route = routes.find(r => r.from === from && r.to === to);
 
@@ -350,6 +415,7 @@ function addRoute(from, to, dates, cabin = 'both') {
     route = { from, to, dates: {} };
     routes.push(route);
   }
+  applyRouteOptions(route, { ...options, cabinKeys: expandCabinKeyword(cabin) });
 
   const cabinKeys = expandCabinKeyword(cabin);
   const { newlyAddedDates, updatedDates } = addDatesWithCabins(route, dates, cabinKeys);
@@ -895,4 +961,5 @@ module.exports = {
   expandCabinKeyword, sortCabinKeys, migrateRoute,
   addDatesWithCabins, removeDatesFromRoute, groupDatesByCabinSignature,
   CABIN_KEYS, CABIN_ORDER,
+  SOURCE_IDS, SOURCE_CHOICES, routeSources, usesSource, parseProgramList, applyRouteOptions,
 };

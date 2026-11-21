@@ -2,7 +2,35 @@
  * Discord slash command registration and handling.
  */
 const { REST, Routes, SlashCommandBuilder } = require('discord.js');
-const { addRoute, removeRoute, syncState, parseDateInput, expandDateRange, formatStatus, formatRoutes, formatFlights, loadRoutes, saveRoutes } = require('./routes');
+const { addRoute, removeRoute, syncState, parseDateInput, expandDateRange, formatStatus, formatRoutes, formatFlights, loadRoutes, saveRoutes, routeSources } = require('./routes');
+
+/** One line describing a route's tracker settings, for /track replies. */
+function describeRouteSettings(route) {
+  const parts = [`Sources: ${routeSources(route).join(' + ')}`];
+  if (route.programs && route.programs.length) parts.push(`programs: ${route.programs.join(', ')}`);
+  if (route.maxMiles) parts.push(`max miles: ${Object.entries(route.maxMiles).map(([k, v]) => `${k} ${v.toLocaleString('en-US')}`).join(', ')}`);
+  if (route.directOnly) parts.push('direct only');
+  if (!process.env.SEATS_AERO_API_KEY && routeSources(route).includes('seats.aero')) parts.push('(seats.aero off: no API key)');
+  return `⚙️ ${parts.join(' · ')}`;
+}
+
+/** /status tail: seats.aero scan health + seats currently under the saver limit. */
+function formatSeatsAeroStatus() {
+  if (!process.env.SEATS_AERO_API_KEY) return '';
+  let st;
+  try { st = require('./seats-run').loadSeatsState(); } catch (e) { return `\n\n⚠️ seats.aero state unreadable: ${e.message}`; }
+  const r = st.lastResult;
+  if (!r) return '\n\n💺 **seats.aero** · no scan yet';
+  const at = new Date(r.at).toLocaleString('en-US', { timeZone: 'America/Los_Angeles', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
+  const today = new Date().toISOString().slice(0, 10);
+  const used = st.usage && st.usage.day === today ? st.usage.calls : 0;
+  const lines = [`\n\n💺 **seats.aero** · scanned ${at} · ${used} API calls today · every ${r.intervalMin} min${r.errors && r.errors.length ? ` · ⚠️ ${r.errors.length} error(s)` : ''}`];
+  const live = Object.values(st.entries || {}).filter(e => e.qualifies).sort((a, b) => a.date.localeCompare(b.date) || a.miles - b.miles);
+  if (live.length === 0) lines.push('  — no saver seats right now —');
+  for (const e of live.slice(0, 12)) lines.push(`  ${e.route} ${e.date} ${e.cabinKey} · ${e.program} ${e.miles.toLocaleString('en-US')}`);
+  if (live.length > 12) lines.push(`  …and ${live.length - 12} more`);
+  return lines.join('\n');
+}
 
 /**
  * Define slash commands.
@@ -21,7 +49,15 @@ const commands = [
       { name: 'Economy only', value: 'economy' },
       { name: 'Business only', value: 'business' },
       { name: 'Premium Economy only', value: 'premium-economy' },
-    )),
+    ))
+    .addStringOption(opt => opt.setName('source').setDescription('Which tracker searches this route (default: both)').setRequired(false).addChoices(
+      { name: 'Both ANA + seats.aero (default)', value: 'both' },
+      { name: 'ANA website only', value: 'ana' },
+      { name: 'seats.aero only (all programs)', value: 'seats.aero' },
+    ))
+    .addStringOption(opt => opt.setName('programs').setDescription('seats.aero programs to alert on, e.g. aeroplan,united ("all" = every program)').setRequired(false))
+    .addIntegerOption(opt => opt.setName('max-miles').setDescription('seats.aero: alert at or below this many miles for the chosen cabin(s); 0 = back to saver pricing').setRequired(false).setMinValue(0))
+    .addBooleanOption(opt => opt.setName('direct-only').setDescription('seats.aero: direct flights only').setRequired(false)),
 
   new SlashCommandBuilder()
     .setName('untrack')
@@ -132,7 +168,14 @@ async function handleCommand(interaction, triggerCheck) {
       }
     }
 
-    const { newlyAddedDates, updatedDates, totalDates } = addRoute(from, to, dates, cabin);
+    const options = {
+      source: interaction.options.getString('source') || undefined,
+      programs: interaction.options.getString('programs') ?? undefined,
+      maxMiles: interaction.options.getInteger('max-miles') ?? undefined,
+      directOnly: interaction.options.getBoolean('direct-only') ?? undefined,
+    };
+    const { route, newlyAddedDates, updatedDates, totalDates } = addRoute(from, to, dates, cabin, options);
+    const settingsLine = describeRouteSettings(route);
 
     const cabinLabels = {
       'both': 'Premium Eco+Business',
@@ -144,7 +187,7 @@ async function handleCommand(interaction, triggerCheck) {
     const cabinLabel = cabinLabels[cabin] || 'Premium Eco+Business';
 
     if (newlyAddedDates.length === 0 && updatedDates.length === 0) {
-      await interaction.reply(`ℹ️ Already tracking **${from}→${to}** with those cabins on those dates. (${totalDates} dates total)`);
+      await interaction.reply(`ℹ️ Already tracking **${from}→${to}** with those cabins on those dates. (${totalDates} dates total)\n${settingsLine}`);
     } else {
       const lines = [`✅ Updated **${from}→${to}**:`];
       if (newlyAddedDates.length > 0) {
@@ -156,6 +199,7 @@ async function handleCommand(interaction, triggerCheck) {
         lines.push(`  • Added ${cabinLabel} cabin(s) to ${updatedDates.length} existing date(s): ${dateStr}`);
       }
       lines.push(`${totalDates} dates total.`);
+      lines.push(settingsLine);
       await interaction.reply(lines.join('\n'));
     }
   }
@@ -270,7 +314,7 @@ async function handleCommand(interaction, triggerCheck) {
   }
 
   else if (commandName === 'status') {
-    const msg = formatStatus();
+    const msg = formatStatus() + formatSeatsAeroStatus();
     // Discord has a 2000 char limit — split if needed
     if (msg.length > 1900) {
       await interaction.reply(msg.substring(0, 1900) + '\n...(truncated)');
