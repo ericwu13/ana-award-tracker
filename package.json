@@ -1,7 +1,7 @@
 {
   "name": "ana-award-tracker",
   "version": "1.0.0",
-  "description": "ANA award ticket availability tracker for TPE→SFO with WhatsApp alerts",
+  "description": "ANA award seat availability tracker with Discord alerts",
   "main": "src/index.js",
   "scripts": {
     "start": "node start.js",
@@ -11,9 +11,7 @@
     "better-sqlite3": "^12.8.0",
     "discord.js": "^14.25.1",
     "dotenv": "^16.6.1",
-    "node-cron": "^3.0.3",
     "puppeteer": "^24.37.5",
-    "puppeteer-extra": "^3.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
     "puppeteer-real-browser": "^1.4.4"
   }
