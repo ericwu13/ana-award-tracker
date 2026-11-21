@@ -7,14 +7,15 @@ Monitors ANA Mileage Club award seat availability for configurable routes and da
 ```
 ANADiscordBot (persistent, starts at login)
   ├── Discord slash commands (/track, /status, /flights, /check)
-  └── Cookie server (port 9444) ← receives cookies from Chrome extension
+  ├── Cookie server (port 9444) ← receives cookies from Chrome extension
+  └── Puppeteer keep-alive (every 25 min)
 
-ANAAwardTracker (Task Scheduler, every 30 min)
-  └── run-once.js → 4 parallel browser sessions → Discord alerts
+ANAAwardTracker (Task Scheduler, every 60 min)
+  └── run-once.js → 2 parallel browser sessions → Discord alerts
 
 Chrome Extension (content script on *.ana.co.jp)
   ├── Pushes cookies to bot every 5 min
-  └── Keeps ANA session alive every 15 min
+  └── Reloads the ANA tab every 14 min to keep the session alive
 ```
 
 ## Setup
@@ -54,9 +55,9 @@ Fill in:
 ### 5. Register Task Scheduler tasks
 
 ```powershell
-# Search runner — every 30 minutes
+# Search runner — every 60 minutes
 $action = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument 'run-check.vbs' -WorkingDirectory 'C:\path\to\ana-award-tracker'
-$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 30)
+$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 60)
 $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Hours 72) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 Register-ScheduledTask -TaskName 'ANAAwardTracker' -Action $action -Trigger $trigger -Settings $settings
 
@@ -103,7 +104,7 @@ ANA uses Akamai Bot Manager which detects browser automation (CDP). Automated lo
 
 1. **You log in manually** in your regular Chrome browser
 2. **Chrome extension** auto-exports cookies to the bot every 5 minutes
-3. **Content script** pings ANA every 15 min to keep the session alive
+3. **Content script** reloads the ANA tab every 14 min to keep the session alive
 4. **Bot uses cookies** to access the award search without logging in
 
 When the session eventually expires, the bot sends a Discord alert asking you to log in again.
@@ -112,7 +113,7 @@ When the session eventually expires, the bot sends a Discord alert asking you to
 
 | `.env` Variable | Default | Description |
 |-----------------|---------|-------------|
-| `MAX_SESSIONS` | `4` | Parallel browser sessions |
+| `MAX_SESSIONS` | `2` | Parallel browser sessions |
 | `SKIP_MIXED_CABIN` | `true` | Skip mixed cabin results (e.g., Economy+Business) |
 | `MAX_LAYOVER_HOURS` | `30` | Skip layovers longer than this |
 | `ALERT_WAITLIST` | `true` | Alert on waitlisted flights |
@@ -129,7 +130,6 @@ src/
   routes.js           — Route/state management
   discord-commands.js  — Slash command definitions
   cookie-server.js    — HTTP server for cookie ingestion
-  scraper.js          — Legacy single-session scraper
 
 cookie-exporter/      — Chrome extension (MV3)
 discord-bot.js        — Persistent Discord bot process
