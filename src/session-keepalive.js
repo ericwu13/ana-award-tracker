@@ -43,7 +43,7 @@ async function refreshSession() {
   }
   // A search cycle running now (or one that just succeeded) already refreshed
   // the aswbe-i session with these cookies — don't launch another Chrome.
-  const skipReason = keepAliveSkipReason();
+  const skipReason = keepAliveSkipReason({ lastKeepAliveSuccess: lastSuccessTime });
   if (skipReason) {
     console.log(`[KeepAlive] Skipping — ${skipReason}`);
     return;

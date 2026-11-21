@@ -64,7 +64,8 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ana-load-'));
 const lockFile = path.join(tmp, 'run.lock');
 const stateFile = path.join(tmp, 'state.json');
 const NOW = Date.parse('2026-11-21T12:00:00Z');
-const gate = (over = {}) => keepAliveSkipReason({ env: {}, now: NOW, lockFile, stateFile, isAlive: () => false, ...over });
+const gate = (over = {}) => keepAliveSkipReason({ env: {}, now: NOW, lockFile, stateFile, isAlive: () => false, lastKeepAliveSuccess: NOW - 10 * 60000, ...over });
+const writeLock = (pid, minAgo = 1) => { fs.writeFileSync(lockFile, String(pid)); const t = new Date(NOW - minAgo * 60000); fs.utimesSync(lockFile, t, t); };
 const writeState = (minAgo, checked) => fs.writeFileSync(stateFile, JSON.stringify({
   lastCoverage: { timestamp: new Date(NOW - minAgo * 60000).toISOString(), checked },
 }));
@@ -72,11 +73,11 @@ const reset = () => { for (const f of [lockFile, stateFile]) try { fs.unlinkSync
 
 test('no lock, no state → run', () => { reset(); assert.strictEqual(gate(), null); });
 test('live run.lock → skip', () => {
-  reset(); fs.writeFileSync(lockFile, '4242');
+  reset(); writeLock(4242);
   assert.match(gate({ isAlive: pid => pid === 4242 }), /in progress/);
 });
 test('stale run.lock (dead pid) → run', () => {
-  reset(); fs.writeFileSync(lockFile, '4242');
+  reset(); writeLock(4242);
   assert.strictEqual(gate(), null);
 });
 test('successful cycle 10 min ago → skip', () => {
@@ -92,13 +93,31 @@ test('recent cycle that checked nothing (blocked / expired) → run', () => {
   assert.strictEqual(gate(), null);
 });
 test('KEEPALIVE_SKIP_AFTER_RUN_MIN=0 disables skipping, even with a live lock', () => {
-  reset(); writeState(1, 5); fs.writeFileSync(lockFile, '4242');
+  reset(); writeState(1, 5); writeLock(4242);
   assert.strictEqual(gate({ env: { KEEPALIVE_SKIP_AFTER_RUN_MIN: '0' }, isAlive: () => true }), null);
 });
 test('custom window and garbage value', () => {
   reset(); writeState(45, 3);
   assert.match(gate({ env: { KEEPALIVE_SKIP_AFTER_RUN_MIN: '60' } }), /45 min ago/);
   assert.strictEqual(gate({ env: { KEEPALIVE_SKIP_AFTER_RUN_MIN: 'abc' } }), null); // falls back to 30
+});
+test('live-looking run.lock older than 2 h (PID reused) → ignored', () => {
+  reset(); writeLock(4242, 121);
+  assert.strictEqual(gate({ isAlive: () => true }), null);
+});
+test('last keep-alive success >60 min ago → run even after a fresh cycle / live lock', () => {
+  reset(); writeState(5, 12); writeLock(4242);
+  assert.strictEqual(gate({ isAlive: () => true, lastKeepAliveSuccess: NOW - 61 * 60000 }), null);
+});
+test('no keep-alive success yet (bot just started) → run', () => {
+  reset(); writeState(5, 12);
+  assert.strictEqual(gate({ lastKeepAliveSuccess: null }), null);
+});
+test('KEEPALIVE_MAX_SKIP_MIN override', () => {
+  reset(); writeState(5, 12);
+  const last = NOW - 61 * 60000;
+  assert.match(gate({ env: { KEEPALIVE_MAX_SKIP_MIN: '90' }, lastKeepAliveSuccess: last }), /5 min ago/);
+  assert.strictEqual(gate({ env: { KEEPALIVE_MAX_SKIP_MIN: 'abc' }, lastKeepAliveSuccess: last }), null);
 });
 test('corrupt state.json → run', () => {
   reset(); fs.writeFileSync(stateFile, '{not json');
