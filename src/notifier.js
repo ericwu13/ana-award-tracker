@@ -107,7 +107,9 @@ async function notifyAvailability(date, result, routeLabel) {
 
   const alertChannelId = process.env.DISCORD_ALERT_CHANNEL_ID;
   const color = result.isMixedCabin ? 0xFF6600 : isWaitlist ? 0xFFA500 : 0x00FF00;
-  const title = statusChange ? `🎫 ANA Award — ${statusChange}` : '🎫 ANA Award Seat Found!';
+  // seats.aero results carry the mileage program (e.g. "Aeroplan") to book with.
+  const program = result.source ? result.sourceName || result.source : 'ANA';
+  const title = statusChange ? `🎫 ${program} Award — ${statusChange}` : `🎫 ${program} Award Seat Found!`;
 
   const embed = {
     title,
@@ -120,6 +122,7 @@ async function notifyAvailability(date, result, routeLabel) {
       { name: 'Route', value: `${routeInfo} ${routeType}`, inline: false },
       { name: 'Flight', value: flightNum, inline: true },
       { name: 'Times', value: timeInfo, inline: true },
+      ...(result.source ? [{ name: 'Book via', value: `${program} (seats.aero${result.remainingSeats ? `, ${result.remainingSeats} seat(s)` : ''})`, inline: false }] : []),
     ],
     footer: {
       text: result.isMixedCabin ? 'Mixed cabin — not all legs match searched class'

@@ -5,6 +5,7 @@ const path = require('path');
 const { runParallel } = require('./session');
 const { cleanupChrome } = require('./chrome-cleanup');
 const { initDiscord, destroyDiscord, notifyAvailability, sendAlert, sendStatusUpdate } = require('./notifier');
+const { searchSeatsAero } = require('./seatsaero');
 
 const { ANA_USERNAME, ANA_PASSWORD } = process.env;
 const MAX_SESSIONS = parseInt(process.env.MAX_SESSIONS || '2');
@@ -84,6 +85,11 @@ function pruneStaleFlights(state, activeRoutes, { maxAgeDays = 30, now = Date.no
  * Generate a stable unique key for a flight itinerary.
  */
 function flightKey(route, date, result) {
+  // Non-ANA sources (seats.aero) are keyed per mileage program so the same
+  // flight seen via ANA and via e.g. Aeroplan stays two separate seats.
+  if (result.source) {
+    return `${route}|${date}|sa-${result.source}-${result.flightNumber || result.cabin}`;
+  }
   // For detailed results: use flight numbers
   if (result.flightNumber) {
     return `${route}|${date}|${result.flightNumber}`;
@@ -163,6 +169,7 @@ async function processOneResult({ route, cabin, date, results }, state) {
         routeDesc: result.routeDesc,
         cabinDesc: result.cabinDesc,
         duration: result.duration,
+        ...(result.source ? { source: result.source, sourceName: result.sourceName } : {}),
         miles: result.miles ?? null,
         taxUsd: result.taxUsd ?? null,
       };
@@ -263,7 +270,8 @@ async function detectGoneFlights(allResults, state, seenKeys) {
         costLine = `\nWas: ${flight.miles.toLocaleString()} miles`;
         if (flight.taxUsd != null) costLine += ` + $${flight.taxUsd.toFixed(2)}`;
       }
-      await sendAlert(`❌ **Seats gone**: ${flight.flightNumber} ${flight.route} ${flight.date}\n${flight.cabinDesc || ''} — no longer available${costLine}`);
+      const via = flight.source ? ` (${flight.sourceName || flight.source} via seats.aero)` : '';
+      await sendAlert(`❌ **Seats gone**: ${flight.flightNumber}${via} ${flight.route} ${flight.date}\n${flight.cabinDesc || ''} — no longer available${costLine}`);
     }
     delete state.flights[key];
   }
@@ -300,12 +308,41 @@ async function main() {
       return;
     }
 
+    if (!state.lastChecked) state.lastChecked = {};
+    let alertsSent = 0;
+    const allSeenKeys = new Set();
+    const onResult = async (entry) => {
+      const { alertsSent: a, seenKeys } = await processOneResult(entry, state);
+      alertsSent += a;
+      for (const k of seenKeys) allSeenKeys.add(k);
+    };
+
+    // seats.aero (Partner API) — plain HTTP, no ANA cookies needed, so it runs
+    // first and even when the ANA session is stale. Its entries use cabin
+    // "seats.aero:<Cabin>" so their GONE combos never mix with ANA's.
+    const seats = await searchSeatsAero(activeRoutes, onResult);
+    if (seats.enabled) {
+      state.lastSeatsAero = {
+        timestamp: new Date().toISOString(),
+        combos: seats.entries.length,
+        errors: seats.errors.length,
+      };
+      if (seats.errors.some(e => e.status === 401 || e.status === 403)) {
+        await sendAlert(`⚠️ seats.aero rejected the API key (HTTP ${seats.errors[0].status}). Check SEATS_AERO_API_KEY.`);
+      }
+    }
+
     // Check if session is known to be stale — don't waste time searching
     const { isStale, getStaleInfo } = require('./session-stale');
     if (isStale()) {
       const info = getStaleInfo();
-      console.log(`[Main] Session is stale: ${info?.reason}. Skipping search.`);
-      await sendStatusUpdate(`⏸️ Search skipped — session stale: ${info?.reason}\nLog in to ANA in Chrome to resume.`);
+      console.log(`[Main] Session is stale: ${info?.reason}. Skipping ANA search.`);
+      if (seats.enabled) {
+        await detectGoneFlights(seats.entries, state, allSeenKeys);
+        pruneStaleFlights(state, activeRoutes, { maxAgeDays: parseInt(process.env.STALE_FLIGHT_DAYS || '30') });
+        saveState(state);
+      }
+      await sendStatusUpdate(`⏸️ ANA search skipped — session stale: ${info?.reason}\nLog in to ANA in Chrome to resume.${seats.enabled ? ' (seats.aero still checked)' : ''}`);
       return;
     }
 
@@ -386,17 +423,6 @@ async function main() {
     // successful search so Discord notifications go out IMMEDIATELY — within
     // seconds of discovery, not after the full 5-15 minute batch completes.
     const startTime = Date.now();
-    if (!state.lastChecked) state.lastChecked = {};
-
-    let alertsSent = 0;
-    const allSeenKeys = new Set();
-
-    const onResult = async (entry) => {
-      const { alertsSent: a, seenKeys } = await processOneResult(entry, state);
-      alertsSent += a;
-      for (const k of seenKeys) allSeenKeys.add(k);
-    };
-
     const allResults = await runParallel(jobs, MAX_SESSIONS, state.lastChecked, onResult);
     const elapsed = Math.round((Date.now() - startTime) / 1000);
 
@@ -472,7 +498,7 @@ async function main() {
 
     // GONE detection — deferred to post-batch because it needs to know
     // which combos were searched AND which flights were NOT found.
-    const validResults = allResults.filter(r => !r._sessionFailed);
+    const validResults = allResults.filter(r => !r._sessionFailed).concat(seats.entries);
     await detectGoneFlights(validResults, state, allSeenKeys);
 
     // Prune orphaned (route/date no longer tracked) and stale (not seen in

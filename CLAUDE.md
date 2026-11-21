@@ -17,6 +17,7 @@ node test/parser.test.js          # per-flight miles extraction from ANA HTML
 node test/gone-detection.test.js  # GONE grace period
 node test/chrome-cleanup.test.js  # orphaned bot-Chrome classification
 node test/browser-window.test.js  # BOT_WINDOW_POSITION resolution
+node test/seatsaero.test.js       # seats.aero Partner API mapping + GONE isolation
 ```
 
 No test framework — uses built-in `assert`. Exits with code 1 on failure.
@@ -98,6 +99,13 @@ Notifications fire **immediately per-flight** via an `onResult` callback from `r
 
 GONE detection uses a **miss grace period** (`GONE_GRACE_MISSES`): a flight is only removed after that many *consecutive* cycles where its combo was searched but the flight wasn't found. Without it, ANA's oscillating waitlist availability deletes a seat's state entry the instant it flickers out, so the seat re-alerts as brand-new when it returns — spamming the channel every cycle. State cleanup (`pruneStaleFlights`: orphaned + age-based) runs **before** `saveState` so deletions actually persist.
 
+## seats.aero source
+
+`src/seatsaero.js` queries the seats.aero Partner API cached search (`GET https://seats.aero/partnerapi/search`, header `Partner-Authorization`) once per route per cycle, covering the route's earliest→latest tracked date, `include_trips=true`. Results are mapped to the ANA parser's shape and fed through the same `processOneResult` / `detectGoneFlights`. Two isolation rules — keep them:
+- Entries use cabin `seats.aero:<Cabin>` so GONE combos never overlap ANA's (an ANA search must not count as a seats.aero miss, and vice versa).
+- Results carry `source` (mileage program); `flightKey` keys them as `sa-<program>-<flight>` so the same flight via ANA and via Aeroplan are separate seats.
+It runs before the ANA stale-session check (no cookies needed). A failed request yields no entries, so GONE skips that route for the cycle. Unverified from docs: `TotalTaxes` assumed in cents, `TotalDuration` in minutes, `DepartsAt` local time with a `Z` suffix.
+
 ## Environment variables
 
 Key `.env` settings (see `docs/cookie-pipeline.md` for full list):
@@ -112,4 +120,5 @@ Key `.env` settings (see `docs/cookie-pipeline.md` for full list):
 - `ALERT_WAITLIST=true`
 - `GONE_GRACE_MISSES=3` — consecutive missed cycles before a flight is treated as gone and removed from state. Guards against ANA's waitlist availability oscillating on/off between cycles, which otherwise deletes + re-alerts the same seat as "new" every pull. Do not set to 1.
 - `BOT_WINDOW_POSITION=-20000,0` — where bot Chrome windows go; unset keeps the legacy positions. See "Hiding bot windows".
+- `SEATS_AERO_API_KEY` — enables the seats.aero source; `SEATS_AERO_SOURCES` (comma list) limits programs; `SEATS_AERO_DIRECT_ONLY=true` nonstop only
 - `STALE_FLIGHT_DAYS=30` — prune cached flights not seen in this many days (backstop for combos that stop being searched, e.g. perpetually rate-limited)
