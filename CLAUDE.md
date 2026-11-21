@@ -17,6 +17,7 @@ node test/parser.test.js          # per-flight miles extraction from ANA HTML
 node test/gone-detection.test.js  # GONE grace period
 node test/chrome-cleanup.test.js  # orphaned bot-Chrome classification
 node test/browser-window.test.js  # BOT_WINDOW_POSITION resolution
+node test/scan-plan.test.js       # seats.aero scan → ANA confirm planner
 ```
 
 No test framework — uses built-in `assert`. Exits with code 1 on failure.
@@ -92,6 +93,10 @@ Legacy format (dates as array + route-level `cabin` string) is auto-migrated on 
 
 Discord `/track` and `/untrack` also have an `until:` option for ranges.
 
+## Scan-then-confirm (seats.aero → ANA)
+
+`SEARCH_STRATEGY=scan-then-confirm` (default `ana-only` = unchanged behaviour) runs a seats.aero Partner API scan first (`src/sources/seats-aero.js`, plain HTTPS, no browser) and only sends ANA the tasks `src/scan-plan.js:planConfirmations` picks: `untrusted-cabin` (not in `SCAN_TRUST_CABINS`, default PE), `scan-failed` (API error → falls back to ANA), `scan-hit`, `tracked` (a seat is already in state — keeps GONE detection working), `due` (not ANA-checked for `SCAN_FULL_RECHECK_HOURS`, capped `SCAN_MAX_DUE_PER_CYCLE`, oldest first — safety net for ANA-member-only / waitlist space seats.aero can't see). The rest are skipped as `scan-miss` and counted in `lastCoverage.scanSkipped`, so `lastCoverage.checked` can legitimately be 0 in this mode. seats.aero hits are candidates only: alerts, state and GONE detection still come from ANA results. Results carry `source` / `program` (`ana` / `ana-amc`; seats.aero rows: `seats.aero` / its program id). The Partner API field names in `rowToEntry` are unverified — check them against a real response before trusting the scan.
+
 ## Notifications
 
 Notifications fire **immediately per-flight** via an `onResult` callback from `runParallel`, not batched after the full search. GONE detection (confirmed flight disappeared) runs post-batch since it requires complete search data.
@@ -112,4 +117,7 @@ Key `.env` settings (see `docs/cookie-pipeline.md` for full list):
 - `ALERT_WAITLIST=true`
 - `GONE_GRACE_MISSES=3` — consecutive missed cycles before a flight is treated as gone and removed from state. Guards against ANA's waitlist availability oscillating on/off between cycles, which otherwise deletes + re-alerts the same seat as "new" every pull. Do not set to 1.
 - `BOT_WINDOW_POSITION=-20000,0` — where bot Chrome windows go; unset keeps the legacy positions. See "Hiding bot windows".
+- `SEARCH_STRATEGY=ana-only` — or `scan-then-confirm` (needs `SEATS_AERO_API_KEY`). See "Scan-then-confirm".
+- `SEATS_AERO_SOURCES=aeroplan,united`, `SEATS_AERO_AIRLINES` (default Star Alliance), `SEATS_AERO_MAX_AGE_HOURS=48`
+- `SCAN_TRUST_CABINS=economy,business`, `SCAN_FULL_RECHECK_HOURS=24`, `SCAN_MAX_DUE_PER_CYCLE=4`
 - `STALE_FLIGHT_DAYS=30` — prune cached flights not seen in this many days (backstop for combos that stop being searched, e.g. perpetually rate-limited)

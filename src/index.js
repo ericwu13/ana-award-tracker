@@ -5,6 +5,9 @@ const path = require('path');
 const { runParallel } = require('./session');
 const { cleanupChrome } = require('./chrome-cleanup');
 const { initDiscord, destroyDiscord, notifyAvailability, sendAlert, sendStatusUpdate } = require('./notifier');
+const { tagResults, SOURCE_ANA, PROGRAM_ANA } = require('./sources');
+const seatsAero = require('./sources/seats-aero');
+const { planConfirmations, strategyConfig } = require('./scan-plan');
 
 const { ANA_USERNAME, ANA_PASSWORD } = process.env;
 const MAX_SESSIONS = parseInt(process.env.MAX_SESSIONS || '2');
@@ -159,6 +162,8 @@ async function processOneResult({ route, cabin, date, results }, state) {
         route,
         date,
         searchedCabin: cabin,
+        source: result.source || SOURCE_ANA,
+        program: result.program || PROGRAM_ANA,
         flightNumber: result.flightNumber,
         routeDesc: result.routeDesc,
         cabinDesc: result.cabinDesc,
@@ -330,13 +335,9 @@ async function main() {
       }
     }
 
-    // Build search jobs from refreshed routes, filtering out skip combos.
-    // Each (date, cabin) pair in a route's dates object becomes a task; we group
-    // tasks by cabin into a single job-per-cabin for runParallel's batching.
-    const jobs = [];
+    // Flatten routes into (route, date, cabin) tasks, filtering out skip combos.
+    let tasks = [];
     for (const route of activeRoutes) {
-      // Group: cabinName -> { code, name, dates: [] }
-      const datesByCabin = new Map();
       for (const [date, cabinKeys] of Object.entries(route.dates || {})) {
         for (const key of cabinKeys) {
           const cabin = CABIN_BY_KEY[key];
@@ -346,24 +347,54 @@ async function main() {
             skippedDueToConfirmed++;
             continue;
           }
-          if (!datesByCabin.has(cabin.name)) {
-            datesByCabin.set(cabin.name, { code: cabin.code, name: cabin.name, dates: [] });
-          }
-          datesByCabin.get(cabin.name).dates.push(date);
-        }
-      }
-      for (const { code, name, dates } of datesByCabin.values()) {
-        if (dates.length > 0) {
-          jobs.push({
-            from: route.from,
-            to: route.to,
-            dates: dates.slice().sort(),
-            cabinCode: code,
-            cabinName: name,
-          });
+          tasks.push({ from: route.from, to: route.to, date, cabinKey: key, cabinName: cabin.name, cabinCode: cabin.code });
         }
       }
     }
+
+    // Scan-then-confirm: let seats.aero sweep every task first (no browser, no
+    // Akamai) and only send ANA the tasks worth confirming. Any scan failure
+    // falls back to ANA for the affected tasks, so the worst case equals the
+    // old ana-only behaviour. Default strategy is still 'ana-only'.
+    const strategy = strategyConfig();
+    let scanSkippedTasks = [];
+    if (strategy.strategy === 'scan-then-confirm' && tasks.length > 0) {
+      if (!seatsAero.enabled()) {
+        console.log('[Main] SEARCH_STRATEGY=scan-then-confirm but SEATS_AERO_API_KEY is unset — using ANA for everything');
+      } else {
+        const scan = await seatsAero.search(tasks, { log: m => console.log(`[Scan] ${m}`) });
+        for (const e of scan.errors) console.log(`[Scan] ⚠️ ${e} — falling back to ANA for that window`);
+        const plan = planConfirmations(tasks, scan, state, strategy);
+        console.log(`[Scan] Plan: ${plan.confirm.length}/${tasks.length} task(s) to ANA ${JSON.stringify(plan.counts)}`);
+        for (const d of plan.confirm.filter(d => d.reason === 'scan-hit')) {
+          const h = d.hits.map(e => `${e.program}${e.miles ? ` ${e.miles.toLocaleString()}` : ''}${e.airlines.length ? ` [${e.airlines.join('/')}]` : ''}`).join(', ');
+          console.log(`[Scan] 🔎 hit ${d.task.from}→${d.task.to} ${d.task.date} ${d.task.cabinKey}: ${h}`);
+        }
+        scanSkippedTasks = plan.skip.map(d => d.task);
+        tasks = plan.confirm.map(d => d.task);
+        state.lastScan = {
+          timestamp: new Date().toISOString(),
+          source: seatsAero.id,
+          total: plan.confirm.length + plan.skip.length,
+          counts: plan.counts,
+          errors: scan.errors.slice(0, 5),
+          hits: plan.confirm.filter(d => d.reason === 'scan-hit').slice(0, 30).map(d => ({
+            route: `${d.task.from}→${d.task.to}`, date: d.task.date, cabin: d.task.cabinKey,
+            programs: [...new Set(d.hits.map(e => e.program))],
+            miles: d.hits.map(e => e.miles).filter(Boolean).sort((a, b) => a - b)[0] ?? null,
+          })),
+        };
+      }
+    }
+
+    // Group tasks by (route, cabin) into jobs for runParallel's batching.
+    const jobsByKey = new Map();
+    for (const t of tasks) {
+      const k = `${t.from}|${t.to}|${t.cabinName}`;
+      if (!jobsByKey.has(k)) jobsByKey.set(k, { from: t.from, to: t.to, dates: [], cabinCode: t.cabinCode, cabinName: t.cabinName });
+      jobsByKey.get(k).dates.push(t.date);
+    }
+    const jobs = [...jobsByKey.values()].map(j => ({ ...j, dates: j.dates.slice().sort() }));
 
     if (skippedDueToConfirmed > 0) {
       console.log(`[Main] Skipping ${skippedDueToConfirmed} task(s) — already confirmed within ${RECHECK_HOURS}h`);
@@ -392,6 +423,7 @@ async function main() {
     const allSeenKeys = new Set();
 
     const onResult = async (entry) => {
+      tagResults(entry.results, { source: SOURCE_ANA, program: PROGRAM_ANA });
       const { alertsSent: a, seenKeys } = await processOneResult(entry, state);
       alertsSent += a;
       for (const k of seenKeys) allSeenKeys.add(k);
@@ -466,6 +498,9 @@ async function main() {
       timedOut: timedOutCount,
       formError: formErrorCount,
       skipped: skippedCount,
+      // Tasks seats.aero ruled out this cycle (not sent to ANA). Not a failure:
+      // with scan-then-confirm, checked can legitimately be 0 when nothing hit.
+      scanSkipped: scanSkippedTasks.length,
       sessionsRateLimited: rateLimitedSessions.length,
       skippedSample: skippedTasks.slice(0, 20),
     };
@@ -503,6 +538,7 @@ async function main() {
     if (formErrorCount > 0) coverageMsg += `, ${formErrorCount} form-error`;
     if (skippedCount > 0) coverageMsg += `, ${skippedCount} skipped`;
     if (skippedDueToConfirmed > 0) coverageMsg += `, ${skippedDueToConfirmed} skipped (already confirmed)`;
+    if (scanSkippedTasks.length > 0) coverageMsg += `, ${scanSkippedTasks.length} ruled out by seats.aero`;
     if (rateLimitedSessions.length > 0) {
       coverageMsg += ` (${rateLimitedSessions.length} session${rateLimitedSessions.length > 1 ? 's' : ''} hit ANA throttle)`;
     }
